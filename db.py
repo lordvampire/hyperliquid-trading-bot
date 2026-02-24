@@ -1,7 +1,6 @@
 """SQLite database — schema, migrations, and query helpers."""
 
 import aiosqlite
-import json
 from datetime import datetime, timezone
 from config import cfg
 
@@ -88,17 +87,60 @@ async def get_today_stats() -> dict:
     return {"date": today, "realized_pnl": 0, "trade_count": 0, "consecutive_losses": 0}
 
 
-async def update_daily_stats(realized_pnl: float, consecutive_losses: int):
+async def update_daily_stats(realized_pnl: float, consecutive_losses: int,
+                              current_balance: float = None):
+    """Update daily stats. Bug #7 fix: properly sets starting_balance and ending_balance.
+
+    - starting_balance is set on first insert and never overwritten.
+    - ending_balance is updated on every call with current_balance.
+    """
     db = await get_db()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     await db.execute(
-        """INSERT INTO daily_stats (date, realized_pnl, trade_count, consecutive_losses)
-           VALUES (?, ?, 1, ?)
+        """INSERT INTO daily_stats (date, starting_balance, ending_balance,
+                                     realized_pnl, trade_count, consecutive_losses)
+           VALUES (?, ?, ?, ?, 1, ?)
            ON CONFLICT(date) DO UPDATE SET
+             ending_balance = COALESCE(?, ending_balance),
              realized_pnl = realized_pnl + ?,
              trade_count = trade_count + 1,
              consecutive_losses = ?""",
-        (today, realized_pnl, consecutive_losses, realized_pnl, consecutive_losses)
+        (today, current_balance, current_balance,
+         realized_pnl, consecutive_losses,
+         current_balance, realized_pnl, consecutive_losses)
+    )
+    await db.commit()
+    await db.close()
+
+
+async def get_risk_state(date: str = None) -> dict | None:
+    """Load risk state from daily_stats for the given date (default: today)."""
+    db = await get_db()
+    d = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = await db.execute_fetchall("SELECT * FROM daily_stats WHERE date = ?", (d,))
+    await db.close()
+    return dict(rows[0]) if rows else None
+
+
+async def save_risk_state(starting_balance: float, ending_balance: float,
+                           realized_pnl: float, consecutive_losses: int,
+                           circuit_breaker_hit: bool, trade_count: int = 0):
+    """Persist full risk state atomically."""
+    db = await get_db()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    await db.execute(
+        """INSERT INTO daily_stats
+           (date, starting_balance, ending_balance, realized_pnl,
+            trade_count, consecutive_losses, circuit_breaker_hit)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(date) DO UPDATE SET
+             ending_balance = excluded.ending_balance,
+             realized_pnl = excluded.realized_pnl,
+             trade_count = excluded.trade_count,
+             consecutive_losses = excluded.consecutive_losses,
+             circuit_breaker_hit = excluded.circuit_breaker_hit""",
+        (today, starting_balance, ending_balance, realized_pnl,
+         trade_count, consecutive_losses, 1 if circuit_breaker_hit else 0)
     )
     await db.commit()
     await db.close()
