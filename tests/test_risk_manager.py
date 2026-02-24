@@ -6,7 +6,7 @@ from manager import RiskManager
 
 @pytest.fixture
 def rm():
-    rm = RiskManager(max_daily_dd_pct=5.0, max_consecutive_losses=3, default_size_pct=2.0)
+    rm = RiskManager(max_daily_dd_pct=5.0, max_consecutive_losses=3, default_size_pct=2.0, db_path=":memory:")
     rm.reset_day(10000.0)
     return rm
 
