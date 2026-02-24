@@ -1,14 +1,15 @@
 """FastAPI server — the API layer for the trading bot."""
 
-import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
 from config import cfg
-from db import init_db
+from db import init_db, get_risk_state, save_risk_state
 from exchange import fetch_balance, fetch_candles
 from manager import RiskManager
 
@@ -17,28 +18,42 @@ risk_manager = RiskManager(
     max_daily_dd_pct=cfg.RISK_MAX_DAILY_DD_PCT,
     max_consecutive_losses=cfg.RISK_MAX_CONSECUTIVE_LOSSES,
     default_size_pct=cfg.RISK_DEFAULT_SIZE_PCT,
+    db_path=cfg.DB_PATH,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    # Initialize risk manager with current balance
+    # Load persisted risk state or initialize from balance
+    await risk_manager.load_state()
     bal_data = fetch_balance()
     if "error" not in bal_data:
         balance = float(bal_data.get("account_value", 0))
-        risk_manager.reset_day(balance)
+        if risk_manager.starting_balance == 0:
+            risk_manager.reset_day(balance)
+            await risk_manager.save_state()
     yield
 
 
 app = FastAPI(title="Hyperliquid Trading Bot", version="0.1.0", lifespan=lifespan)
 
+# Bug #8: Add CORS middleware restricted to localhost
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost", "http://127.0.0.1", "http://localhost:3000", "http://localhost:8000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+
+# Bug #4: Return {"status": "healthy"} per spec
 @app.get("/health")
 async def health():
     config_issues = cfg.validate()
     return {
-        "status": "ok" if not config_issues else "degraded",
+        "status": "healthy" if not config_issues else "degraded",
         "testnet": cfg.HL_TESTNET,
         "config_issues": config_issues,
     }
@@ -59,24 +74,36 @@ class OrderRequest(BaseModel):
     order_type: str = "market"
 
 
-@app.post("/order")
+# Bug #5: Return 202 Accepted for queued orders
+@app.post("/order", status_code=202)
 async def place_order(req: OrderRequest):
     allowed, reason = risk_manager.can_trade()
     if not allowed:
         raise HTTPException(status_code=403, detail=f"Trading blocked: {reason}")
 
     # Phase 1: order placement is stubbed — wiring to SDK comes in Phase 2
-    return {
-        "status": "received",
-        "note": "Order execution not yet wired (Phase 2)",
-        "order": req.model_dump(),
-        "suggested_size": risk_manager.get_position_size(),
-    }
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "order queued",
+            "order": req.model_dump(),
+            "suggested_size": risk_manager.get_position_size(),
+        },
+    )
 
 
+# Bug #6: Proper error handling — SDK errors → 500, bad input → 400
 @app.get("/candles")
 async def candles(symbol: str = "BTC", interval: str = "1h", limit: int = 100):
-    data = fetch_candles(symbol, interval, limit)
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+    valid_intervals = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+    if interval not in valid_intervals:
+        raise HTTPException(status_code=400, detail=f"interval must be one of {valid_intervals}")
+    try:
+        data = fetch_candles(symbol, interval, limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     return {"symbol": symbol, "interval": interval, "count": len(data), "candles": data}
 
 
