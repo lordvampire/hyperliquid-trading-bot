@@ -12,11 +12,12 @@ from manager import RiskManager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Shared risk manager instance (in production, import from main)
+# Bug #3 fix: Use DB-backed RiskManager so state is shared with API process
 risk_manager = RiskManager(
     max_daily_dd_pct=cfg.RISK_MAX_DAILY_DD_PCT,
     max_consecutive_losses=cfg.RISK_MAX_CONSECUTIVE_LOSSES,
     default_size_pct=cfg.RISK_DEFAULT_SIZE_PCT,
+    db_path=cfg.DB_PATH,
 )
 
 
@@ -55,6 +56,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await risk_manager.load_state()  # Bug #3: reload shared state from DB
     bal = fetch_balance()
     risk = risk_manager.status()
     msg = format_status(bal, risk)
@@ -74,6 +76,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await risk_manager.load_state()  # Bug #3: reload shared state from DB
     risk = risk_manager.status()
     can = "✅" if risk["can_trade"] else "❌"
     await update.message.reply_text(
