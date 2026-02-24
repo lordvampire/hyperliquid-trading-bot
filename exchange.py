@@ -1,5 +1,7 @@
 """Hyperliquid SDK wrapper — abstracts testnet/mainnet connectivity."""
 
+import time
+from eth_account import Account
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
@@ -16,11 +18,15 @@ def get_info() -> Info:
 
 
 def get_exchange() -> Exchange | None:
-    """Authenticated exchange client for placing orders. Returns None if no key."""
+    """Authenticated exchange client for placing orders. Returns None if no key.
+
+    Bug #2 fix: SDK requires a LocalAccount object, not None.
+    """
     if not cfg.HL_SECRET_KEY:
         return None
+    wallet = Account.from_key(cfg.HL_SECRET_KEY)
     return Exchange(
-        wallet=None,  # SDK handles key internally
+        wallet=wallet,
         base_url=get_base_url(),
         account_address=cfg.HL_WALLET_ADDRESS or None,
     )
@@ -56,13 +62,20 @@ def fetch_balance(address: str = None) -> dict:
 
 
 def fetch_candles(symbol: str, interval: str = "1h", limit: int = 100) -> list[dict]:
-    """Fetch OHLCV candles from Hyperliquid."""
+    """Fetch OHLCV candles from Hyperliquid.
+
+    Bug #1 fix: SDK signature is candles_snapshot(name, interval, startTime, endTime).
+    We compute startTime from limit and pass endTime correctly.
+    """
     info = get_info()
-    try:
-        import time
-        end_time = int(time.time() * 1000)
-        # HL SDK snapshot method
-        candles = info.candles_snapshot(symbol, interval, end_time, limit)
-        return candles
-    except Exception as e:
-        return [{"error": str(e)}]
+    end_time = int(time.time() * 1000)
+    # Estimate startTime based on interval and limit
+    interval_ms_map = {
+        "1m": 60_000, "5m": 300_000, "15m": 900_000,
+        "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000,
+        "1d": 86_400_000,
+    }
+    interval_ms = interval_ms_map.get(interval, 3_600_000)
+    start_time = end_time - (limit * interval_ms)
+    candles = info.candles_snapshot(symbol, interval, start_time, end_time)
+    return candles
