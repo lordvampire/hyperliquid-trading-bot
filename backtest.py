@@ -20,19 +20,18 @@ class BacktestEngine:
         """
         Run backtest over historical period.
         """
-        # Fetch candles
-        candles = fetch_candles(symbol, interval, limit=days * 24)
-        if "error" in candles or not candles.get("data"):
+        # Fetch candles (returns list[dict], not dict)
+        try:
+            candle_data = fetch_candles(symbol, interval, limit=days * 24)
+            if not isinstance(candle_data, list) or not candle_data:
+                return {
+                    "status": "error",
+                    "message": f"failed to fetch candles for {symbol}",
+                }
+        except Exception as e:
             return {
                 "status": "error",
-                "message": f"failed to fetch candles for {symbol}",
-            }
-
-        candle_data = candles.get("data", [])
-        if not candle_data:
-            return {
-                "status": "error",
-                "message": f"no candle data for {symbol}",
+                "message": f"fetch failed: {str(e)}",
             }
 
         # Simulate trades
