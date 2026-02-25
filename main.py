@@ -12,6 +12,8 @@ from config import cfg
 from db import init_db, get_risk_state, save_risk_state
 from exchange import fetch_balance, fetch_candles
 from manager import RiskManager
+from strategy_b import StrategyB
+from backtest import BacktestEngine
 
 
 risk_manager = RiskManager(
@@ -20,6 +22,8 @@ risk_manager = RiskManager(
     default_size_pct=cfg.RISK_DEFAULT_SIZE_PCT,
     db_path=cfg.DB_PATH,
 )
+
+strategy_b = StrategyB()
 
 
 @asynccontextmanager
@@ -110,6 +114,65 @@ async def candles(symbol: str = "BTC", interval: str = "1h", limit: int = 100):
 @app.get("/risk")
 async def risk_status():
     return risk_manager.status()
+
+
+# Phase 2: Strategy B Endpoints
+
+@app.get("/next_signal")
+async def next_signal(symbol: str = "BTC"):
+    """Get next trading signal using Strategy B (sentiment + funding rates)."""
+    signal = strategy_b.get_next_signal(symbol)
+    return signal
+
+
+class ExecuteTradeRequest(BaseModel):
+    symbol: str
+    allow_low_confidence: bool = False
+
+
+@app.post("/execute_trade", status_code=202)
+async def execute_trade(req: ExecuteTradeRequest):
+    """Execute trade based on Strategy B signal."""
+    signal = strategy_b.get_next_signal(req.symbol)
+    
+    if signal["confidence"] < 0.3 and not req.allow_low_confidence:
+        raise HTTPException(
+            status_code=400,
+            detail=f"signal confidence too low: {signal['confidence']:.2%}"
+        )
+    
+    # Check risk
+    allowed, reason = risk_manager.can_trade()
+    if not allowed:
+        raise HTTPException(status_code=403, detail=f"Trading blocked: {reason}")
+    
+    # Execute
+    trade = strategy_b.execute_trade(req.symbol, signal)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "trade queued",
+            "trade": trade,
+            "risk_status": risk_manager.status(),
+        },
+    )
+
+
+class BacktestRequest(BaseModel):
+    symbol: str
+    days: int = 30
+    interval: str = "1h"
+
+
+@app.post("/backtest")
+async def run_backtest(req: BacktestRequest):
+    """Run backtest of Strategy B."""
+    if req.days < 1 or req.days > 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+    
+    engine = BacktestEngine(start_balance=1000)
+    results = engine.run(req.symbol, days=req.days, interval=req.interval)
+    return results
 
 
 if __name__ == "__main__":
