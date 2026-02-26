@@ -124,10 +124,10 @@ def get_exchange() -> Exchange | None:
 
 
 def fetch_balance(address: str = None) -> dict:
-    """Fetch account balance + positions from Hyperliquid."""
+    """Fetch account balance + positions from Hyperliquid (PERPS/Margin Account)."""
     addr = address or cfg.HL_WALLET_ADDRESS
     
-    logger.debug(f"💰 Fetching balance for: {addr}")
+    logger.debug(f"💰 Fetching PERPS account balance for: {addr}")
     
     if not addr:
         logger.error("❌ No wallet address configured!")
@@ -142,32 +142,17 @@ def fetch_balance(address: str = None) -> dict:
         logger.debug(f"✅ API response received")
         logger.debug(f"   Raw state keys: {state.keys()}")
         
-        # FIX: Query SPOT account balance (assetPositions), not margin account
-        # Hyperliquid has: marginSummary (perps), assetPositions (spot + perps combined)
-        # For spot-only balance, check the first asset's usdValue
-        spot_balance = 0.0
-        positions = state.get("assetPositions", [])
-        
-        # Find USDC spot balance
-        for pos in positions:
-            if pos.get("position", {}).get("coin") == "USDC":
-                # USDC position usdValue = spot balance
-                spot_balance = float(pos.get("position", {}).get("szi", 0))
-                logger.debug(f"   Found USDC position: {spot_balance}")
-                break
-        
-        # Also get margin info for reference
+        # PERPS/Margin Account (for leverage trading with 35x)
         account_value = state.get("marginSummary", {}).get("accountValue", "0")
         total_margin = state.get("marginSummary", {}).get("totalMarginUsed", "0")
+        positions = state.get("assetPositions", [])
         
-        logger.info(f"✅ Spot Balance: {spot_balance} USDC")
-        logger.info(f"   Perps Account Value: {account_value} USD (margin used: {total_margin})")
+        logger.info(f"✅ Perps Account Value: {account_value} USD (used margin: {total_margin})")
         logger.info(f"   Positions: {len([p for p in positions if float(p['position']['szi']) != 0])} open")
         
         result = {
             "address": addr,
             "testnet": cfg.HL_TESTNET,
-            "spot_balance": spot_balance,  # USDC spot balance
             "account_value": account_value,  # Perps margin account
             "total_margin_used": total_margin,
             "positions": [

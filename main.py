@@ -86,15 +86,7 @@ async def debug():
 async def status():
     bal = fetch_balance()
     risk = risk_manager.status()
-    
-    # Extract spot balance for display
-    balance_display = bal.get("spot_balance", bal.get("account_value", 0))
-    
-    return {
-        "balance": balance_display,
-        "balance_details": bal,
-        "risk": risk
-    }
+    return {"balance": bal, "risk": risk}
 
 
 class OrderRequest(BaseModel):
