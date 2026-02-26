@@ -63,6 +63,25 @@ async def health():
     }
 
 
+@app.get("/debug")
+async def debug():
+    """Comprehensive debug information to diagnose connection issues."""
+    from exchange import validate_config
+    
+    config_check = validate_config()
+    balance_data = fetch_balance()
+    
+    return {
+        "config_validation": config_check,
+        "balance_data": balance_data,
+        "testnet_mode": cfg.HL_TESTNET,
+        "wallet_address": cfg.HL_WALLET_ADDRESS,
+        "private_key_set": bool(cfg.HL_SECRET_KEY),
+        "private_key_length": len(cfg.HL_SECRET_KEY) if cfg.HL_SECRET_KEY else 0,
+        "private_key_starts_with_0x": cfg.HL_SECRET_KEY.startswith("0x") if cfg.HL_SECRET_KEY else False,
+    }
+
+
 @app.get("/status")
 async def status():
     bal = fetch_balance()
