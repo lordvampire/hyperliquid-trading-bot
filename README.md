@@ -98,11 +98,64 @@ pytest tests/ -v
 └── README.md
 ```
 
+## Architecture — Phase 2
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Hyperliquid API                      │
+│  • Real-time funding rates   • OHLCV candles            │
+│  • Account state            • Trade execution           │
+└──────────────────┬──────────────────────────────────────┘
+                   │
+         ┌─────────┴─────────┐
+         │                   │
+    ┌────▼────┐        ┌────▼───────┐
+    │ funding │        │  exchange  │
+    │  .py    │        │    .py     │
+    └────┬────┘        └────────────┘
+         │                 (raw API)
+         │
+    ┌────▼──────────────┐
+    │  sentiment.py     │
+    │ (heuristic engine)│     Input: Funding trends + volatility
+    └────┬──────────────┘     Output: BUY/SELL/HOLD signals
+         │
+         └──────────┬──────────────┐
+                    │              │
+            ┌───────▼────┐    ┌────▼──────────┐
+            │ strategy_b │    │  backtest.py  │
+            │    .py     │    │  (validation) │
+            │  (router)  │    └───────────────┘
+            └───────┬────┘
+                    │
+         ┌──────────┴────────────┐
+         │                       │
+    ┌────▼──────────┐   ┌───────▼────────┐
+    │    main.py    │   │ testnet_runner │
+    │   (REST API)  │   │    .py         │
+    └───────────────┘   │  (validation)  │
+                        └────────────────┘
+                              │
+                        ┌─────▼──────┐
+                        │   SQLite   │
+                        │  (logging) │
+                        └────────────┘
+```
+
+**Data Flow:**
+1. **funding.py** → Fetches real funding rates (1h cache)
+2. **sentiment.py** → Analyzes trends (40% funding trend, 30% current level, 30% volatility)
+3. **strategy_b.py** → Combines sentiment + funding, generates signals
+4. **backtest.py** → Validates on historical data (fees included)
+5. **testnet_runner.py** → Runs live validation with logging
+6. **SQLite** → Stores all decisions for analysis
+
 ## Risk Management
 
 - **Daily Drawdown Cap:** Stops trading if daily loss exceeds configured % (default: 5%)
 - **Circuit Breaker:** Stops trading after N consecutive losses (default: 3)
 - **Position Sizing:** Calculates size as % of current balance (default: 2%)
+- **Fee Modeling:** 0.02% entry + 0.06% exit in backtesting (realistic costs)
 
 ## Phase 2: Strategy Engine (LIVE)
 
@@ -183,13 +236,39 @@ This tests:
 - Backtest engine with historical candles
 - Strategy B signal generation
 
-### Testnet Validation (In Progress)
+### Testnet Validation
 
-Currently implementing:
-- [ ] 12-hour live testnet run
-- [ ] 5-10 real test trades logged to SQLite
-- [ ] Verify sentiment/funding signals in practice
-- [ ] Document each trade decision
+Run Phase 2 strategy on testnet with automated logging:
+
+```bash
+# Quick test: 30 minutes, BTC + ETH
+python3 testnet_runner.py --duration 30
+
+# Full validation: 12 hours (720 minutes)
+python3 testnet_runner.py --duration 720
+
+# Custom symbols, 24-hour run
+python3 testnet_runner.py --duration 1440 --symbols BTC,ETH,SOL
+```
+
+This will:
+- ✓ Check signals every 30 minutes (configurable)
+- ✓ Log all signals to SQLite (test_trades table)
+- ✓ Track sentiment + funding components
+- ✓ Generate final report with statistics
+- ✓ Show signal decision tree for each check
+
+Database queries after run:
+```sql
+-- All signals from test run
+SELECT timestamp, symbol, signal, action FROM test_trades 
+WHERE test_run_id = '20260226_093700' 
+ORDER BY timestamp;
+
+-- Summary statistics
+SELECT * FROM test_run_summary 
+WHERE test_run_id = '20260226_093700';
+```
 
 ## Roadmap
 
