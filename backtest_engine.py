@@ -36,12 +36,36 @@ class BacktestEngine:
         self.max_balance = starting_balance
         self.max_drawdown_pct = 0.0
     
+    def calculate_rsi(self, closes: list, period: int = 14) -> float:
+        """Calculate RSI (Relative Strength Index)"""
+        if len(closes) < period:
+            return 50.0
+        
+        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        gains = [d if d > 0 else 0 for d in deltas[-period:]]
+        losses = [-d if d < 0 else 0 for d in deltas[-period:]]
+        
+        avg_gain = sum(gains) / period if gains else 0
+        avg_loss = sum(losses) / period if losses else 0
+        
+        if avg_loss == 0:
+            return 100 if avg_gain > 0 else 50
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    def calculate_sma(self, closes: list, period: int = 20) -> float:
+        """Calculate Simple Moving Average"""
+        if len(closes) < period:
+            return closes[-1]
+        return sum(closes[-period:]) / period
+    
     def simple_signal(self, closes: list) -> str:
-        """Generate simple trading signal (BUY/SELL/HOLD)"""
+        """STRATEGY 1: Simple Momentum (old - doesn't work well)"""
         if len(closes) < 5:
             return "HOLD"
         
-        # Simple momentum: if price went up 1%+ in last 5 candles = BUY
         change_5 = (closes[-1] - closes[-5]) / closes[-5] * 100
         change_1 = (closes[-1] - closes[-2]) / closes[-2] * 100
         
@@ -52,7 +76,50 @@ class BacktestEngine:
         else:
             return "HOLD"
     
-    def backtest_symbol(self, symbol: str, days: int = 7) -> dict:
+    def improved_signal(self, closes: list) -> str:
+        """STRATEGY 2: Multi-Filter (Momentum + RSI + Trend)"""
+        if len(closes) < 20:
+            return "HOLD"
+        
+        # Check momentum
+        change_5 = (closes[-1] - closes[-5]) / closes[-5] * 100
+        
+        # Check RSI
+        rsi = self.calculate_rsi(closes)
+        
+        # Check trend (SMA)
+        sma = self.calculate_sma(closes, 20)
+        price_above_sma = closes[-1] > sma
+        
+        # BUY: Momentum > 0.5% AND RSI > 50 AND Price above SMA
+        if change_5 > 0.5 and rsi > 55 and price_above_sma:
+            return "BUY"
+        # SELL: Momentum < -0.5% AND RSI < 50 AND Price below SMA
+        elif change_5 < -0.5 and rsi < 45 and not price_above_sma:
+            return "SELL"
+        else:
+            return "HOLD"
+    
+    def mean_reversion_signal(self, closes: list) -> str:
+        """STRATEGY 3: Mean Reversion (Buy dips, Sell rallies)"""
+        if len(closes) < 20:
+            return "HOLD"
+        
+        sma = self.calculate_sma(closes, 20)
+        std_dev = (sum((c - sma) ** 2 for c in closes[-20:]) / 20) ** 0.5
+        
+        current = closes[-1]
+        
+        # BUY: Price 1.5x std below SMA
+        if current < sma - (1.5 * std_dev):
+            return "BUY"
+        # SELL: Price 1.5x std above SMA
+        elif current > sma + (1.5 * std_dev):
+            return "SELL"
+        else:
+            return "HOLD"
+    
+    def backtest_symbol(self, symbol: str, days: int = 7, strategy: str = "improved") -> dict:
         """Backtest a symbol over N days"""
         try:
             # Fetch historical candles (1h, last 7 days = 168 candles)
@@ -90,7 +157,15 @@ class BacktestEngine:
             
             for i in range(20, len(closes)):  # Start after enough history
                 recent_closes = closes[max(0, i-20):i+1]
-                signal = self.simple_signal(recent_closes)
+                
+                # Select strategy
+                if strategy == "simple":
+                    signal = self.simple_signal(recent_closes)
+                elif strategy == "mean_reversion":
+                    signal = self.mean_reversion_signal(recent_closes)
+                else:  # improved (default)
+                    signal = self.improved_signal(recent_closes)
+                
                 current_price = closes[i]
                 
                 # Open position
@@ -147,6 +222,7 @@ class BacktestEngine:
             return {
                 "symbol": symbol,
                 "days": days,
+                "strategy": strategy,
                 "candles_analyzed": len(closes),
                 "starting_balance": self.starting_balance,
                 "ending_balance": balance,
@@ -165,14 +241,14 @@ class BacktestEngine:
             logger.error(f"Backtest failed for {symbol}: {e}")
             return {"error": str(e)}
 
-async def run_backtest_multi(symbols: list, days: int = 7) -> dict:
+async def run_backtest_multi(symbols: list, days: int = 7, strategy: str = "improved") -> dict:
     """Run backtest on multiple symbols"""
     engine = BacktestEngine()
     results = {}
     
     for symbol in symbols:
-        logger.info(f"Backtesting {symbol} over {days} days...")
-        result = engine.backtest_symbol(symbol, days)
+        logger.info(f"Backtesting {symbol} over {days} days with {strategy} strategy...")
+        result = engine.backtest_symbol(symbol, days, strategy)
         results[symbol] = result
     
     return results
@@ -180,6 +256,21 @@ async def run_backtest_multi(symbols: list, days: int = 7) -> dict:
 def format_backtest_result(results: dict) -> str:
     """Format backtest results for display"""
     lines = ["📊 *BACKTEST RESULTS*\n"]
+    
+    # Get strategy from first result
+    strategy = None
+    for result in results.values():
+        if "strategy" in result:
+            strategy = result["strategy"]
+            break
+    
+    if strategy:
+        strategy_names = {
+            "simple": "Simple Momentum (OLD)",
+            "improved": "Multi-Filter (Recommended)",
+            "mean_reversion": "Mean Reversion"
+        }
+        lines.append(f"Strategy: *{strategy_names.get(strategy, strategy)}*\n")
     
     total_profit = 0
     total_return = 0

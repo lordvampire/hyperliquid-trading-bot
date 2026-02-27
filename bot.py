@@ -167,15 +167,22 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*🔬 BACKTESTING & ANALYSIS*\n"
         "═══════════════════════════════════════════════\n\n"
         
-        "**/backtest [days] [symbols]**\n"
+        "**/backtest [strategy] [days] [symbols]**\n"
         "Test strategy on past N days of data\n"
-        "Default: 7 days, BTC ETH SOL\n"
-        "Shows: profit/loss, win rate, max drawdown\n"
+        "Strategies: `simple` | `improved` | `mean_reversion`\n"
+        "Default: improved strategy, 7 days, BTC ETH SOL\n\n"
+        
+        "*Strategies:*\n"
+        "  `simple` — Old momentum (not recommended)\n"
+        "  `improved` — Multi-filter + RSI (⭐ BEST)\n"
+        "  `mean_reversion` — Buy dips, sell rallies\n\n"
+        
         "Usage:\n"
-        "  `/backtest` — 7 days BTC ETH SOL\n"
-        "  `/backtest 14` — 14 days BTC ETH SOL\n"
-        "  `/backtest 7 BTC ETH` — 7 days BTC ETH\n"
-        "Max: 60 days, 5 symbols\n\n"
+        "  `/backtest` — Improved, 7d, BTC/ETH/SOL\n"
+        "  `/backtest improved 14` — Improved, 14 days\n"
+        "  `/backtest mean_reversion 7 BTC` — MeanRev, 7d, BTC\n"
+        "  `/backtest simple 30` — Old strat, 30 days\n\n"
+        "Max: 60 days, 5 symbols per test\n\n"
         
         "═══════════════════════════════════════════════\n"
         "*💡 QUICK START GUIDE*\n"
@@ -370,29 +377,50 @@ async def cmd_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run backtest on historical data"""
-    # Parse arguments: /backtest [days] [symbols]
-    # Default: 7 days, BTC ETH SOL
+    # Parse arguments: /backtest [strategy] [days] [symbols]
+    # Strategies: simple, improved, mean_reversion
+    # Default: improved strategy, 7 days, BTC ETH SOL
+    
+    strategy = "improved"
     days = 7
     symbols = ["BTC", "ETH", "SOL"]
     
     if context.args:
-        try:
-            days = int(context.args[0])
-            if days < 1 or days > 60:
-                await update.message.reply_text("⚠️ Days must be between 1 and 60")
-                return
-        except (ValueError, IndexError):
-            pass
+        arg_idx = 0
         
-        if len(context.args) > 1:
-            symbols = [s.upper() for s in context.args[1:]]
+        # Check if first arg is a strategy
+        if context.args[arg_idx] in ["simple", "improved", "mean_reversion"]:
+            strategy = context.args[arg_idx]
+            arg_idx += 1
+        
+        # Parse days
+        if arg_idx < len(context.args):
+            try:
+                days = int(context.args[arg_idx])
+                if days < 1 or days > 60:
+                    await update.message.reply_text("⚠️ Days must be between 1 and 60")
+                    return
+                arg_idx += 1
+            except ValueError:
+                pass
+        
+        # Parse symbols
+        if arg_idx < len(context.args):
+            symbols = [s.upper() for s in context.args[arg_idx:]]
             if len(symbols) > 5:
                 await update.message.reply_text("⚠️ Max 5 symbols allowed")
                 return
     
+    strategy_names = {
+        "simple": "Simple Momentum",
+        "improved": "Multi-Filter",
+        "mean_reversion": "Mean Reversion"
+    }
+    
     await update.message.reply_text(
-        f"📊 Backtesting {', '.join(symbols)} over {days} days...\n"
-        "Please wait (this may take a moment)..."
+        f"📊 Backtesting {', '.join(symbols)}\n"
+        f"Strategy: {strategy_names[strategy]} | Days: {days}\n"
+        f"Please wait (this may take a moment)..."
     )
     
     try:
@@ -400,7 +428,7 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = {}
         
         for symbol in symbols:
-            result = engine.backtest_symbol(symbol, days)
+            result = engine.backtest_symbol(symbol, days, strategy)
             results[symbol] = result
         
         formatted = format_backtest_result(results)
