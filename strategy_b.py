@@ -35,11 +35,11 @@ class StrategyB:
         # Combined signal
         combined_score = (sentiment_score * sentiment["confidence"] + funding_score * funding["strength"]) / 2
 
-        # Determine trade signal
-        if combined_score > 0.3:
+        # Determine trade signal (confidence threshold: 0.05 for aggressive trading)
+        if combined_score > 0.05:
             trade_signal = "BUY"
             confidence = combined_score
-        elif combined_score < -0.3:
+        elif combined_score < -0.05:
             trade_signal = "SELL"
             confidence = abs(combined_score)
         else:
@@ -63,7 +63,7 @@ class StrategyB:
         trade_signal = signal.get("signal", "HOLD")
         confidence = signal.get("confidence", 0)
 
-        if trade_signal == "HOLD" or confidence < 0.3:
+        if trade_signal == "HOLD" or confidence < 0.05:
             return {
                 "status": "skipped",
                 "reason": f"low confidence ({confidence:.2%})",
