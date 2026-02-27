@@ -30,3 +30,17 @@ paper:
 
 live:
   mode: live
+
+optimization:
+  sensitivity_variations: [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]  # ±30% steps
+  grid_search_values_per_param: 7
+  optuna_trials: 50
+  optuna_sampler: "tpe"           # Tree-structured Parzen Estimator (Bayesian)
+  walk_forward_windows: 3
+  consistency_threshold: 0.3     # Sharpe std dev max
+  min_win_rate: 0.45
+  max_drawdown_limit: 0.15
+
+paper_trading:
+  duration_days: 14
+  starting_balance: 1000.0
