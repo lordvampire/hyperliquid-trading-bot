@@ -1,101 +1,197 @@
-"""Tests for Strategy B (Phase 2)."""
+"""Unit tests for StrategyB (Phase 1 refactor)."""
 
-import sys
-import os
+from __future__ import annotations
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strategy_b import StrategyB
-from sentiment import SentimentAnalyzer
-from funding import FundingRateAnalyzer
+import pytest
+import pandas as pd
+import numpy as np
+
+from strategies.base import Signal, StrategyBase
+from strategies.strategy_b import StrategyB
+from config.manager import ConfigManager
 
 
-def test_sentiment_analyzer():
-    """Test sentiment analyzer."""
-    analyzer = SentimentAnalyzer()
-    
-    # Test analyze
-    sentiment = analyzer.analyze("BTC")
-    assert "symbol" in sentiment
-    assert "sentiment_score" in sentiment
-    assert "signal" in sentiment
-    assert sentiment["signal"] in ["BUY", "SELL", "HOLD"]
-    assert -1 <= sentiment["sentiment_score"] <= 1
-    assert 0 <= sentiment["confidence"] <= 1
-    print("✓ Sentiment analyzer works")
+# ------------------------------------------------------------------
+# Shared fixtures
+# ------------------------------------------------------------------
+
+VALID_CONFIG = {
+    "fast_period": 5,
+    "slow_period": 20,
+    "rsi_period": 14,
+    "momentum_weight": 0.50,
+    "rsi_weight": 0.30,
+    "volume_weight": 0.20,
+    "entry_threshold": 0.40,
+    "exit_threshold": 0.15,
+    "stop_pct": 0.02,
+    "tp_pct": 0.04,
+}
 
 
-def test_funding_rate_analyzer():
-    """Test funding rate analyzer."""
-    analyzer = FundingRateAnalyzer()
-    
-    # Test get_funding_rate
-    rate = analyzer.get_funding_rate("BTC")
-    assert "funding_rate" in rate
-    assert "symbol" in rate
-    assert isinstance(rate["funding_rate"], float)
-    print("✓ Funding rate analyzer works")
-    
-    # Test signal generation
-    signal = analyzer.get_funding_signal("BTC")
-    assert signal["signal"] in ["LONG", "SHORT", "NEUTRAL"]
-    assert 0 <= signal["strength"] <= 1
-    print("✓ Funding signal generation works")
-    
-    # Test history
-    history = analyzer.get_history("BTC", limit=10)
-    assert len(history) == 10
-    print("✓ Funding history works")
+def make_mock_df(n: int = 60, trend: float = 0.5) -> pd.DataFrame:
+    """Return a deterministic OHLCV DataFrame."""
+    np.random.seed(42)
+    close = 100.0
+    rows = []
+    for _ in range(n):
+        close = close * (1 + np.random.normal(trend / 1000, 0.005))
+        rows.append({
+            "open": close * 0.999,
+            "high": close * 1.005,
+            "low":  close * 0.995,
+            "close": close,
+            "volume": np.random.uniform(800, 1200),
+        })
+    return pd.DataFrame(rows)
 
 
-def test_strategy_b():
-    """Test Strategy B."""
-    strategy = StrategyB()
-    
-    # Test get_next_signal
-    signal = strategy.get_next_signal("BTC")
-    assert "symbol" in signal
-    assert signal["signal"] in ["BUY", "SELL", "HOLD"]
-    assert "confidence" in signal
-    assert 0 <= signal["confidence"] <= 1
-    print("✓ Strategy B signal generation works")
-    
-    # Test execute_trade
-    trade = strategy.execute_trade("BTC", signal)
-    assert "status" in trade
-    assert trade["status"] in ["queued", "skipped"]
-    print("✓ Strategy B trade execution works")
-    
-    # Test check_exit
-    should_exit, reason = strategy.check_exit("BTC")
-    assert isinstance(should_exit, bool)
-    assert isinstance(reason, str)
-    print("✓ Strategy B exit check works")
+# ------------------------------------------------------------------
+# 1. Initialisation
+# ------------------------------------------------------------------
+
+class TestStrategyBInit:
+    def test_init_with_valid_config(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        assert strat is not None
+        assert strat.mode == "backtest"
+
+    def test_init_stores_config(self):
+        strat = StrategyB(VALID_CONFIG, "paper")
+        assert strat.config["fast_period"] == 5
+
+    def test_init_missing_param_raises(self):
+        bad_cfg = {k: v for k, v in VALID_CONFIG.items() if k != "entry_threshold"}
+        with pytest.raises(ValueError, match="Missing required config keys"):
+            StrategyB(bad_cfg, "backtest")
+
+    def test_init_empty_config_raises(self):
+        with pytest.raises(ValueError):
+            StrategyB({}, "backtest")
 
 
-def test_strategy_b_integration():
-    """Integration test: signal -> execute -> exit."""
-    strategy = StrategyB()
-    symbol = "ETH"
-    
-    # Get signal
-    signal = strategy.get_next_signal(symbol)
-    assert signal["signal"] in ["BUY", "SELL", "HOLD"]
-    
-    # Execute if confident
-    if signal["confidence"] > 0.3:
-        trade = strategy.execute_trade(symbol, signal)
-        assert trade["status"] == "queued"
-        print(f"✓ Executed {trade['side']} trade with confidence {signal['confidence']:.2%}")
-    
-    # Check exit
-    should_exit, reason = strategy.check_exit(symbol)
-    assert isinstance(should_exit, bool)
-    print("✓ Exit check works")
+# ------------------------------------------------------------------
+# 2. required_params()
+# ------------------------------------------------------------------
 
+class TestRequiredParams:
+    def test_returns_list(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        assert isinstance(strat.required_params(), list)
+
+    def test_contains_expected_keys(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        rp = strat.required_params()
+        for key in ["fast_period", "entry_threshold", "stop_pct", "tp_pct"]:
+            assert key in rp, f"{key} missing from required_params()"
+
+    def test_all_params_in_valid_config(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        for key in strat.required_params():
+            assert key in VALID_CONFIG
+
+
+# ------------------------------------------------------------------
+# 3. get_params()
+# ------------------------------------------------------------------
+
+class TestGetParams:
+    def test_returns_dict(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        assert isinstance(strat.get_params(), dict)
+
+    def test_matches_input_config(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        params = strat.get_params()
+        assert params["fast_period"] == 5
+        assert params["entry_threshold"] == 0.40
+
+
+# ------------------------------------------------------------------
+# 4. generate_signals()
+# ------------------------------------------------------------------
+
+class TestGenerateSignals:
+    def test_returns_list(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        df = make_mock_df(60)
+        sigs = strat.generate_signals(df)
+        assert isinstance(sigs, list)
+
+    def test_all_items_are_signal_instances(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        df = make_mock_df(60)
+        sigs = strat.generate_signals(df)
+        assert all(isinstance(s, Signal) for s in sigs)
+
+    def test_signal_fields_populated(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        df = make_mock_df(60)
+        sigs = strat.generate_signals(df)
+        for s in sigs:
+            assert s.direction in ("LONG", "SHORT", "HOLD")
+            assert 0.0 <= s.strength <= 1.0
+            assert isinstance(s.metadata, dict)
+            assert "composite_score" in s.metadata
+            assert "bar_index" in s.metadata
+
+    def test_stop_loss_take_profit_set_for_long(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        df = make_mock_df(60)
+        sigs = strat.generate_signals(df)
+        long_sigs = [s for s in sigs if s.direction == "LONG"]
+        if long_sigs:
+            s = long_sigs[0]
+            assert s.stop_loss > 0
+            assert s.take_profit > s.stop_loss
+
+    def test_empty_df_returns_empty_list(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        sigs = strat.generate_signals(pd.DataFrame())
+        assert sigs == []
+
+    def test_insufficient_data_returns_empty(self):
+        strat = StrategyB(VALID_CONFIG, "backtest")
+        df = make_mock_df(5)
+        sigs = strat.generate_signals(df)
+        assert sigs == []
+
+
+# ------------------------------------------------------------------
+# 5. ConfigManager integration
+# ------------------------------------------------------------------
+
+class TestConfigManagerIntegration:
+    def test_load_base_yaml(self):
+        cfg = ConfigManager("config/base.yaml", "backtest")
+        assert cfg.strategy("strategy_b")["entry_threshold"] == 0.40
+
+    def test_strategy_returns_dict(self):
+        cfg = ConfigManager("config/base.yaml", "backtest")
+        strat_cfg = cfg.strategy("strategy_b")
+        assert isinstance(strat_cfg, dict)
+
+    def test_strategy_b_from_config(self):
+        cfg = ConfigManager("config/base.yaml", "backtest")
+        strat = StrategyB(cfg.strategy("strategy_b"), "backtest")
+        assert "fast_period" in strat.get_params()
+
+    def test_missing_strategy_raises(self):
+        cfg = ConfigManager("config/base.yaml", "backtest")
+        with pytest.raises(KeyError):
+            cfg.strategy("nonexistent_strategy")
+
+    def test_dot_notation_get(self):
+        cfg = ConfigManager("config/base.yaml", "backtest")
+        slippage = cfg.get("backtest.slippage_pct")
+        assert slippage == 0.08
+
+
+# ------------------------------------------------------------------
+# Standalone runner
+# ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    test_sentiment_analyzer()
-    test_funding_rate_analyzer()
-    test_strategy_b()
-    test_strategy_b_integration()
-    print("\n✅ All Phase 2 tests passed!")
+    pytest.main([__file__, "-v"])
