@@ -2,7 +2,8 @@
 """
 Enhanced Telegram Bot with Live Signal Monitoring
 Shows real-time analysis and periodic updates
-Features: /stop, /shutdown, /live, /analyze, /status, /risk
+Features: /stop, /shutdown, /live, /analyze, /status, /risk,
+          /optimize, /paper_trade, /go_live  (Phase 4)
 """
 
 import asyncio
@@ -18,8 +19,43 @@ from exchange import fetch_balance, fetch_candles
 from manager import RiskManager
 from backtest_engine import BacktestEngine, format_backtest_result
 
+# Phase 4 imports
+try:
+    from config.manager import ConfigManager
+    from safety_manager import SafetyManager
+    from live_deployment import LiveDeployment
+    from optimization_runner import OptimizationRunner
+    from paper_trader import PaperTrader
+    from strategies.strategy_b import StrategyB
+    _PHASE4_AVAILABLE = True
+except ImportError as _p4_err:
+    _PHASE4_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Phase 4 modules not fully available: {_p4_err}")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Phase 4: global config + safety manager ----------------------------
+_p4_config: "ConfigManager | None" = None
+_p4_safety: "SafetyManager | None" = None
+_live_deployment: "LiveDeployment | None" = None
+
+def _get_p4_config() -> "ConfigManager | None":
+    global _p4_config
+    if _p4_config is None and _PHASE4_AVAILABLE:
+        try:
+            _p4_config = ConfigManager("config/base.yaml", "backtest")
+        except Exception as exc:
+            logger.warning(f"Could not load Phase 4 config: {exc}")
+    return _p4_config
+
+def _get_p4_safety() -> "SafetyManager | None":
+    global _p4_safety
+    if _p4_safety is None and _PHASE4_AVAILABLE:
+        cfg_obj = _get_p4_config()
+        if cfg_obj:
+            _p4_safety = SafetyManager(cfg_obj)
+    return _p4_safety
 
 # Risk manager
 risk_manager = RiskManager(
@@ -198,11 +234,23 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Bot status"""
+    """Bot status — includes Phase 4 safety checks if available"""
     await risk_manager.load_state()
     bal = fetch_balance()
     risk = risk_manager.status()
     msg = format_status(bal, risk)
+
+    # Phase 4: append safety check summary
+    safety = _get_p4_safety()
+    if safety:
+        can_trade = safety.check_daily_limit()
+        ct_icon = "✅" if can_trade else "🔴"
+        msg += f"\n\n🛡️ *Safety (Phase 4):*\n  Circuit Breaker: {ct_icon} {'OFF' if can_trade else 'ACTIVE'}"
+        if _live_deployment:
+            status = _live_deployment.get_status()
+            msg += f"\n  Live trading: {'🟢 Running' if status['running'] else '⚪ Stopped'}"
+            msg += f"\n  Open positions: {len(status['open_positions'])}"
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,11 +270,11 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Risk details"""
+    """Risk details — includes Phase 4 safety circuit breaker"""
     await risk_manager.load_state()
     risk = risk_manager.status()
     can = "✅ Trading enabled" if risk["can_trade"] else "❌ Trading blocked"
-    
+
     msg = (
         f"🛡️ *Risk Status*\n\n"
         f"Daily P&L: ${risk['daily_pnl']:,.2f}\n"
@@ -236,6 +284,19 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Circuit Breaker: {'🔴 ACTIVE!' if risk['circuit_breaker_active'] else '🟢 Off'}\n\n"
         f"Status: {can}"
     )
+
+    # Phase 4 safety additions
+    safety = _get_p4_safety()
+    if safety:
+        p4_cb = not safety.check_daily_limit()
+        msg += (
+            f"\n\n*Phase 4 Safety Manager:*\n"
+            f"  Max Daily DD: {safety.max_daily_dd_pct}%\n"
+            f"  Max Leverage: {safety.max_leverage}x\n"
+            f"  Max Slippage: {safety.max_slippage_pct}%\n"
+            f"  Circuit Breaker: {'🔴 ACTIVE' if p4_cb else '🟢 Off'}"
+        )
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -484,6 +545,179 @@ async def monitor_signals(chat_id: int, app: Application):
     except asyncio.CancelledError:
         pass
 
+# ============================================================
+# PHASE 4 COMMANDS
+# ============================================================
+
+async def cmd_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /optimize [symbol] [days]
+    Trigger OptimizationRunner: sensitivity + grid search → best params.
+    """
+    if not _PHASE4_AVAILABLE:
+        await update.message.reply_text("❌ Phase 4 modules not available.")
+        return
+
+    symbol = context.args[0].upper() if context.args else "BTC"
+    try:
+        days = int(context.args[1]) if len(context.args) > 1 else 30
+    except (ValueError, IndexError):
+        days = 30
+
+    await update.message.reply_text(
+        f"⚙️ *Running optimization for {symbol} ({days}d)…*\n"
+        f"Sensitivity + Grid Search — this may take 30–120 seconds.",
+        parse_mode="Markdown",
+    )
+
+    try:
+        runner = OptimizationRunner(symbol, days, config_path="config/base.yaml")
+        results = runner.quick_optimization("optimization_results")
+        best = results.get("best_params", {})
+        sharpe = results.get("sharpe_final", 0.0)
+        msg = (
+            f"✅ *Optimization complete for {symbol}*\n\n"
+            f"Best Sharpe: `{sharpe:.3f}`\n"
+            f"Best Params:\n"
+        )
+        for k, v in best.items():
+            msg += f"  `{k}`: {v}\n"
+        msg += "\nParams saved to `param_history.json`"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as exc:
+        logger.error(f"Optimize error: {exc}")
+        await update.message.reply_text(f"❌ Optimization failed: {exc}")
+
+
+async def cmd_paper_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /paper_trade [symbol] [days]
+    Run PaperTrader on recent data, compare vs backtest, report divergence.
+    """
+    if not _PHASE4_AVAILABLE:
+        await update.message.reply_text("❌ Phase 4 modules not available.")
+        return
+
+    symbol = context.args[0].upper() if context.args else "BTC"
+    try:
+        days = int(context.args[1]) if len(context.args) > 1 else 14
+    except (ValueError, IndexError):
+        days = 14
+
+    await update.message.reply_text(
+        f"📄 *Running paper trade for {symbol} ({days}d)…*",
+        parse_mode="Markdown",
+    )
+
+    try:
+        config   = _get_p4_config()
+        strategy = StrategyB(config.strategy("strategy_b"), "paper")
+        trader   = PaperTrader(strategy, config)
+
+        result = trader.paper_trade(symbol, starting_balance=1000.0, duration_days=days)
+        comparison = trader.compare_backtest_vs_paper(symbol, days=days)
+
+        pnl      = result.get("total_pnl", 0.0)
+        ret_pct  = result.get("return_pct", 0.0) * 100
+        n_trades = result.get("num_trades", 0)
+        alerts   = comparison.get("divergence_alerts", [])
+
+        msg = (
+            f"📄 *Paper Trade Result — {symbol} ({days}d)*\n\n"
+            f"P&L: `${pnl:+.2f}` ({ret_pct:+.2f}%)\n"
+            f"Trades: {n_trades}\n"
+        )
+        if alerts:
+            msg += f"\n⚠️ *Divergence Alerts ({len(alerts)}):*\n"
+            for a in alerts[:3]:
+                msg += f"  • {a}\n"
+        else:
+            msg += "\n✅ No model drift detected."
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as exc:
+        logger.error(f"Paper trade error: {exc}")
+        await update.message.reply_text(f"❌ Paper trade failed: {exc}")
+
+
+async def cmd_go_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /go_live [symbol] [amount]
+    ADMIN ONLY — Start LiveDeployment with the given starting capital.
+    """
+    global _live_deployment
+
+    if not _PHASE4_AVAILABLE:
+        await update.message.reply_text("❌ Phase 4 modules not available.")
+        return
+
+    # Admin check — use config admin_user_ids
+    config = _get_p4_config()
+    admin_ids = config.get("telegram.admin_user_ids", []) if config else []
+    user_id = update.effective_user.id
+
+    if admin_ids and user_id not in admin_ids:
+        logger.warning(f"Unauthorized /go_live attempt from user_id={user_id}")
+        await update.message.reply_text("❌ Unauthorized. Admin only.")
+        return
+
+    symbol = context.args[0].upper() if context.args else "BTC"
+    try:
+        amount = float(context.args[1]) if len(context.args) > 1 else 100.0
+    except (ValueError, IndexError):
+        amount = 100.0
+
+    await update.message.reply_text(
+        f"🚀 *Starting live trading…*\n\nSymbol: {symbol}\nCapital: ${amount:,.2f}\n\n"
+        "⚠️ Safety checks will run before every trade.",
+        parse_mode="Markdown",
+    )
+
+    try:
+        strategy = StrategyB(config.strategy("strategy_b"), "live")
+        safety   = _get_p4_safety()
+        # Override starting capital
+        config._data.setdefault("deployment", {})["starting_capital"] = amount
+
+        deployer = LiveDeployment(
+            strategy=strategy,
+            config=config,
+            exchange=None,          # None = dry-run until mainnet is configured
+            safety_manager=safety,
+        )
+        deployer.start_trading()
+        _live_deployment = deployer
+
+        # Audit the go-live event
+        safety.log_trade(
+            trade_id=f"GO_LIVE-{user_id}",
+            symbol=symbol,
+            signal=__import__("strategies.base", fromlist=["Signal"]).Signal(
+                symbol, "HOLD", 0.0, 0.0, 0.0,
+                {"event": "go_live", "admin_id": user_id, "amount": amount}
+            ),
+            entry_price=0.0,
+            size=0.0,
+            status="go_live",
+        )
+
+        status = deployer.get_status()
+        msg = (
+            f"✅ *Live trading started on {symbol}*\n\n"
+            f"Capital: `${amount:,.2f}`\n"
+            f"Can trade: {'✅' if status['can_trade'] else '❌'}\n"
+            f"Circuit breaker: {'🔴 ACTIVE' if status['circuit_breaker'] else '🟢 Off'}\n\n"
+            f"Use /status to monitor."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as exc:
+        logger.error(f"Go-live error: {exc}")
+        await update.message.reply_text(f"❌ Go-live failed: {exc}")
+
+
 def run_bot():
     """Start Telegram bot"""
     if not cfg.TELEGRAM_BOT_TOKEN:
@@ -503,6 +737,10 @@ def run_bot():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("shutdown", cmd_shutdown))
+    # Phase 4 commands
+    app.add_handler(CommandHandler("optimize", cmd_optimize))
+    app.add_handler(CommandHandler("paper_trade", cmd_paper_trade))
+    app.add_handler(CommandHandler("go_live", cmd_go_live))
     
     logger.info("🤖 Telegram Bot v2 Enhanced starting...")
     app.run_polling()
