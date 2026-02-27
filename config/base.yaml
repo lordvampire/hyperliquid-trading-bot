@@ -44,3 +44,21 @@ optimization:
 paper_trading:
   duration_days: 14
   starting_balance: 1000.0
+
+safety:
+  max_daily_dd_pct: 5.0
+  max_leverage: 35
+  max_slippage_pct: 2.0
+  network_latency_limit_ms: 2000
+  audit_log_path: "logs/audit.log"
+
+deployment:
+  strategy: "strategy_b"
+  mode: "backtest"          # backtest | paper | live
+  starting_capital: 1000.0
+  registry_path: "param_history.json"
+  email_reports: true
+  report_time_utc: "18:00"  # 6 PM UTC = 7 PM Berlin
+
+telegram:
+  admin_user_ids: [5890731372]  # Faruk's Telegram ID
