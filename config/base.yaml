@@ -11,10 +11,18 @@ strategies:
     stop_pct: 0.02
     tp_pct: 0.04
 
+position_sizing:
+  max_position_pct: 0.20      # max 20% of balance per trade
+  base_size_pct: 0.10         # base 10% of balance
+  volatility_scale: 0.5       # scaling factor for volatility adjustment
+  leverage_cap: 5.0           # max leverage multiplier
+
 backtest:
   mode: backtest
-  slippage_pct: 0.08
-  spread_pct: 0.05
+  slippage_pct: 0.08          # 0.08% slippage
+  spread_pct: 0.05            # 0.05% spread
+  maker_fee: 0.02             # 0.02% maker fee
+  taker_fee: 0.05             # 0.05% taker fee (normal fill)
   starting_balance: 1000
 
 paper:
