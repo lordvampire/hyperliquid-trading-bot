@@ -1,0 +1,24 @@
+strategies:
+  strategy_b:
+    fast_period: 5
+    slow_period: 20
+    rsi_period: 14
+    momentum_weight: 0.50
+    rsi_weight: 0.30
+    volume_weight: 0.20
+    entry_threshold: 0.40
+    exit_threshold: 0.15
+    stop_pct: 0.02
+    tp_pct: 0.04
+
+backtest:
+  mode: backtest
+  slippage_pct: 0.08
+  spread_pct: 0.05
+  starting_balance: 1000
+
+paper:
+  mode: paper
+
+live:
+  mode: live
