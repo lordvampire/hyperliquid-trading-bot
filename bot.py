@@ -16,6 +16,7 @@ from telegram.error import TelegramError
 from config import cfg
 from exchange import fetch_balance, fetch_candles
 from manager import RiskManager
+from backtest_engine import BacktestEngine, format_backtest_result
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /analyze [BTC|ETH|SOL] — Analyze symbol now\n"
         "  /live — Start 30sec live monitoring ⚡\n"
         "  /stop — Stop live monitoring\n"
+        "  /backtest [days] — Test on past data 🔬\n"
         "  /shutdown — Stop entire bot\n\n"
         "🎮 Testnet Mode Active\n"
         "Type /help for detailed guide!"
@@ -160,6 +162,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ This terminates all processes!\n"
         "You'll need to restart it manually.\n"
         "Usage: `/shutdown`\n\n"
+        
+        "═══════════════════════════════════════════════\n"
+        "*🔬 BACKTESTING & ANALYSIS*\n"
+        "═══════════════════════════════════════════════\n\n"
+        
+        "**/backtest [days] [symbols]**\n"
+        "Test strategy on past N days of data\n"
+        "Default: 7 days, BTC ETH SOL\n"
+        "Shows: profit/loss, win rate, max drawdown\n"
+        "Usage:\n"
+        "  `/backtest` — 7 days BTC ETH SOL\n"
+        "  `/backtest 14` — 14 days BTC ETH SOL\n"
+        "  `/backtest 7 BTC ETH` — 7 days BTC ETH\n"
+        "Max: 60 days, 5 symbols\n\n"
         
         "═══════════════════════════════════════════════\n"
         "*💡 QUICK START GUIDE*\n"
@@ -352,6 +368,48 @@ async def cmd_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(2)
     os._exit(0)
 
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run backtest on historical data"""
+    # Parse arguments: /backtest [days] [symbols]
+    # Default: 7 days, BTC ETH SOL
+    days = 7
+    symbols = ["BTC", "ETH", "SOL"]
+    
+    if context.args:
+        try:
+            days = int(context.args[0])
+            if days < 1 or days > 60:
+                await update.message.reply_text("⚠️ Days must be between 1 and 60")
+                return
+        except (ValueError, IndexError):
+            pass
+        
+        if len(context.args) > 1:
+            symbols = [s.upper() for s in context.args[1:]]
+            if len(symbols) > 5:
+                await update.message.reply_text("⚠️ Max 5 symbols allowed")
+                return
+    
+    await update.message.reply_text(
+        f"📊 Backtesting {', '.join(symbols)} over {days} days...\n"
+        "Please wait (this may take a moment)..."
+    )
+    
+    try:
+        engine = BacktestEngine(starting_balance=1000.0)
+        results = {}
+        
+        for symbol in symbols:
+            result = engine.backtest_symbol(symbol, days)
+            results[symbol] = result
+        
+        formatted = format_backtest_result(results)
+        await update.message.reply_text(formatted, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        await update.message.reply_text(f"❌ Backtest failed: {str(e)}")
+
 async def monitor_signals(chat_id: int, app: Application):
     """Monitor and send signal updates"""
     symbols = ["BTC", "ETH", "SOL"]
@@ -415,6 +473,7 @@ def run_bot():
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("live", cmd_live))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("shutdown", cmd_shutdown))
     
     logger.info("🤖 Telegram Bot v2 Enhanced starting...")
