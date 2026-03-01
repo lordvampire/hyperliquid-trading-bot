@@ -1,8 +1,10 @@
-# Hyperliquid Trading Bot
+# Hyperliquid Trading Bot — VMR Strategy
 
-A Python-based trading bot for [Hyperliquid](https://hyperliquid.xyz) with FastAPI REST API, Telegram integration, and built-in risk management.
+A Python-based autonomous trading bot for [Hyperliquid](https://hyperliquid.xyz) using a **Volatility Mean Reversion (VMR)** strategy, with Telegram integration, parameter optimization, and paper/live trading modes.
 
-**Status:** Phase 2 — Real Strategy Engine (live sentiment + funding rates + realistic backtesting)
+**Status:** ✅ Production Ready (VMR Strategy v2.0, March 2026)
+
+---
 
 ## Quick Start
 
@@ -30,251 +32,235 @@ cp example.env .env
 
 | Variable | Description |
 |---|---|
-| `HL_SECRET_KEY` | Your Hyperliquid private key (testnet!) |
+| `HL_SECRET_KEY` | Your Hyperliquid private key (for live/testnet trading) |
 | `HL_WALLET_ADDRESS` | Your wallet address |
 | `HL_TESTNET` | `true` for testnet, `false` for mainnet |
+| `HL_DRY_RUN` | `true` to validate orders without executing |
 | `TELEGRAM_BOT_TOKEN` | From @BotFather |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
+| `PAPER_BALANCE` | Starting balance for paper trading (default: `10000.0`) |
+
+> **Mode Detection:**
+> - `HL_SECRET_KEY` set → **LIVE mode** (real orders on testnet/mainnet)
+> - `HL_SECRET_KEY` missing → **PAPER mode** (simulation, no real money)
+> - `HL_DRY_RUN=true` → **DRY RUN** (validates but sends no orders)
 
 ### 4. Run
 
-**API Server:**
 ```bash
-python main.py
-# → http://localhost:8000
-# → http://localhost:8000/docs (Swagger UI)
+python vmr_trading_bot.py
 ```
 
-**Telegram Bot** (separate terminal):
-```bash
-python bot.py
+### 5. Start Trading
+
+In Telegram, send:
+```
+/start_auto
 ```
 
-### 5. Test
+---
 
-```bash
-# Health check
-curl http://localhost:8000/health
+## 🎯 VMR Strategy
 
-# Account status
-curl http://localhost:8000/status
+**Volatility Mean Reversion** — detects price spikes and bets on reversion to the mean.
 
-# Unit tests
-pytest tests/ -v
+### Logic
+
+1. **Detect volatility spike** — 1h return ≥ spike threshold (default: 1%)
+2. **Confirm with Bollinger Bands** — price must be outside BB in same direction
+3. **Enter mean-reversion trade** — bet OPPOSITE to spike direction
+4. **Tight risk management** — 0.5% stop-loss, 1.5% take-profit, max 24h hold
+
+### Example
+
+```
+BTC: 1h return = -1.2% (sharp drop)
+BB lower band = $64,500, Current price = $64,400 (below lower band)
+→ Signal: LONG (bet on reversion up)
+→ Entry: $64,400 | SL: $64,080 (-0.5%) | TP: $65,360 (+1.5%)
 ```
 
-## API Endpoints
+---
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/health` | Health check + config validation |
-| GET | `/status` | Balance, positions, risk status |
-| POST | `/order` | Place order (stubbed in Phase 1) |
-| GET | `/candles?symbol=BTC&interval=1h` | OHLCV candles |
-| GET | `/risk` | Risk manager status |
+## 📊 Telegram Commands
 
-## Telegram Commands
+### Core Trading
 
 | Command | Description |
-|---|---|
-| `/start` | Activate bot |
-| `/status` | Full status (balance + positions + risk) |
-| `/balance` | Account balance only |
-| `/risk` | Risk manager status |
+|---------|-------------|
+| `/start` | Welcome message and quick status |
+| `/help` | Full command reference |
+| `/start_auto` | Start autonomous trading loop (every 15 min) |
+| `/stop_auto` | Stop the loop (keep positions open) |
+| `/stop_all` | Stop loop + close all positions at market |
+| `/status` | Current positions, P&L, loop info |
+| `/stats` | Completed trade statistics |
+| `/balance` | Account balance + risk settings |
+| `/mode` | Show current trading mode (live/paper/dry-run) |
+
+### Analysis
+
+| Command | Description |
+|---------|-------------|
+| `/analyze [BTC\|ETH\|SOL]` | On-demand signal analysis for one symbol |
+| `/signals` | Latest VMR signal for all symbols |
+| `/backtest [BTC] [days]` | Run backtest on real historical data |
+
+### Optimization
+
+| Command | Description |
+|---------|-------------|
+| `/optimize [BTC\|ETH\|SOL]` | Run parameter grid search (10,000+ combinations) |
+| `/show_best_params` | Display top 3 parameter sets from last optimization |
+| `/set_params spike=X bb_mult=Y sl=0.005 tp=0.015 size=0.01 hold=24` | Update VMR parameters live |
+
+---
+
+## ⚙️ VMR Parameters
+
+All parameters live in **one place**: `VMRConfig` in `strategy_engine.py`. All modes (backtest, paper, live) pick up changes automatically.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `spike_threshold_pct` | 1.0% | 1h return magnitude to trigger signal |
+| `bb_std_multiplier` | 2.0 | Bollinger Band width multiplier |
+| `sl_pct` | 0.5% | Stop-loss distance from entry |
+| `tp_pct` | 1.5% | Take-profit distance from entry |
+| `position_size_pct` | 1% | Fraction of account per trade |
+| `max_hold_hours` | 24 | Max hours to hold a position |
+| `scan_interval_seconds` | 900 | How often the loop scans (15 min) |
+| `symbols` | BTC, ETH, SOL | Instruments traded |
+
+---
+
+## 🔧 Parameter Optimization Workflow
+
+```bash
+# Step 1: Run optimization (5–15 min)
+/optimize BTC
+
+# Step 2: Review results
+/show_best_params
+
+# Step 3: Backtest on out-of-sample data
+/backtest BTC 30
+
+# Step 4: Apply and start trading
+/set_params spike=1.0 bb_mult=3.0 sl=0.006 tp=0.025 size=0.01 hold=12
+/start_auto
+```
+
+Or run the optimizer as a standalone CLI:
+
+```bash
+python optimizer.py                  # BTC, ETH, SOL (all)
+python optimizer.py --symbol BTC     # Single symbol
+python optimizer.py --dry-run        # Quick smoke test
+```
+
+Results saved to `optimization_results/` and `best_params.json`.
+
+---
+
+## 🛡️ Risk Management
+
+| Guard | Value |
+|-------|-------|
+| Daily loss limit | 5% of account |
+| Max open positions | 3 |
+| Stop-loss (default) | 0.5% from entry |
+| Take-profit (default) | 1.5% from entry |
+| Max hold time | 24 hours |
+| Leverage | 5–10x (configurable) |
+
+---
 
 ## Project Structure
 
 ```
-├── main.py          # FastAPI server
-├── bot.py           # Telegram bot
-├── exchange.py      # Hyperliquid SDK wrapper
-├── manager.py       # Risk manager (DD cap, circuit breaker)
-├── db.py            # SQLite schema + queries
-├── config.py        # Environment config
-├── tests/
-│   └── test_risk_manager.py
+hyperliquid-trading-bot/
+├── vmr_trading_bot.py     ← Main bot (Telegram + autonomous loop)
+├── strategy_engine.py     ← VMR strategy (single source of truth)
+├── live_trader.py         ← Hyperliquid order execution (testnet/mainnet)
+├── optimizer.py           ← Parameter grid-search optimizer
 ├── requirements.txt
 ├── example.env
-└── README.md
+│
+├── optimization_results/  ← CSV results per symbol + best_params.json
+├── candle_cache/          ← Cached 180d 1h candles per symbol
+├── tests/
+│   └── test_strategy_engine.py  (42 unit tests)
+│
+├── README.md              ← This file
+├── README_VMR.md          ← Detailed VMR guide
+└── USER_MANUAL.md         ← Full usage manual
 ```
-
-## Architecture — Phase 2
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Hyperliquid API                      │
-│  • Real-time funding rates   • OHLCV candles            │
-│  • Account state            • Trade execution           │
-└──────────────────┬──────────────────────────────────────┘
-                   │
-         ┌─────────┴─────────┐
-         │                   │
-    ┌────▼────┐        ┌────▼───────┐
-    │ funding │        │  exchange  │
-    │  .py    │        │    .py     │
-    └────┬────┘        └────────────┘
-         │                 (raw API)
-         │
-    ┌────▼──────────────┐
-    │  sentiment.py     │
-    │ (heuristic engine)│     Input: Funding trends + volatility
-    └────┬──────────────┘     Output: BUY/SELL/HOLD signals
-         │
-         └──────────┬──────────────┐
-                    │              │
-            ┌───────▼────┐    ┌────▼──────────┐
-            │ strategy_b │    │  backtest.py  │
-            │    .py     │    │  (validation) │
-            │  (router)  │    └───────────────┘
-            └───────┬────┘
-                    │
-         ┌──────────┴────────────┐
-         │                       │
-    ┌────▼──────────┐   ┌───────▼────────┐
-    │    main.py    │   │ testnet_runner │
-    │   (REST API)  │   │    .py         │
-    └───────────────┘   │  (validation)  │
-                        └────────────────┘
-                              │
-                        ┌─────▼──────┐
-                        │   SQLite   │
-                        │  (logging) │
-                        └────────────┘
-```
-
-**Data Flow:**
-1. **funding.py** → Fetches real funding rates (1h cache)
-2. **sentiment.py** → Analyzes trends (40% funding trend, 30% current level, 30% volatility)
-3. **strategy_b.py** → Combines sentiment + funding, generates signals
-4. **backtest.py** → Validates on historical data (fees included)
-5. **testnet_runner.py** → Runs live validation with logging
-6. **SQLite** → Stores all decisions for analysis
-
-## Risk Management
-
-- **Daily Drawdown Cap:** Stops trading if daily loss exceeds configured % (default: 5%)
-- **Circuit Breaker:** Stops trading after N consecutive losses (default: 3)
-- **Position Sizing:** Calculates size as % of current balance (default: 2%)
-- **Fee Modeling:** 0.02% entry + 0.06% exit in backtesting (realistic costs)
-
-## Phase 2: Strategy Engine (LIVE)
-
-### What's New
-
-**Real Data Integration** — No more fake values:
-
-- **Sentiment Analysis**: Heuristic-based sentiment using:
-  - Funding rate trends (24h moving direction)
-  - Current funding level (high positive = bearish; high negative = bullish)  
-  - Volatility in funding (indicator of conviction)
-  - Generates signals: BUY, SELL, HOLD with confidence scores
-
-- **Funding Rates**: Real-time from Hyperliquid API:
-  - Fetches actual funding history via `/info/fundingHistory`
-  - 1-hour cache to avoid API hammering
-  - Signals: LONG (pay less), SHORT (collect), NEUTRAL
-
-- **Backtesting**: Realistic P&L on historical candles:
-  - Uses real OHLCV from Hyperliquid
-  - Realistic trading costs: 0.02% entry fee, 0.06% exit fee
-  - Includes funding paid over position duration
-  - Simulates SL/TP exits (5% each way from entry)
-  - Reports win rate, ROI, and per-trade details
-
-### How Strategy B Works
-
-1. **Sentiment Analysis** (40% weight):
-   - Analyze funding trends: RISING → bullish, FALLING → bearish
-   
-2. **Funding Signal** (30% weight):
-   - High positive funding → shorters paying, take SHORT position
-   - High negative funding → longs paying, take LONG position
-   
-3. **Combined Score**:
-   - If sentiment + funding align (both bullish or both bearish) → STRONG signal
-   - Otherwise → HOLD
-
-4. **Entry**:
-   - Only when combined confidence > 30%
-   - Position size = 2% of balance (risk controlled)
-
-5. **Exit**:
-   - Take profit: 5% above entry (long) or below entry (short)
-   - Stop loss: 5% below entry (long) or above entry (short)
-   - Signal reversal: if sentiment flips, close position
-
-### Example Trade Log
-
-```
-Timestamp: 2026-02-26T09:00:00
-Symbol: BTC
-Sentiment: RISING funding, avg rate +0.000013 → BULLISH
-Funding: Current rate -0.000025 (low negative) → NEUTRAL
-Combined Score: +0.20 (low confidence) → HOLD
 
 ---
 
-Timestamp: 2026-02-26T12:00:00
-Symbol: ETH
-Sentiment: FALLING funding, avg rate -0.000008 → BEARISH
-Funding: Current rate +0.000045 (high positive) → SHORT
-Combined Score: -0.65 (strong confidence) → SELL
-Position: Short 10 ETH @ $2500
-Exit: Take profit @ $2375 (5% below entry) = +$1,250 profit
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│         Hyperliquid API (mainnet)       │
+│   OHLCV candles (read-only, no key)     │
+└─────────────┬───────────────────────────┘
+              │
+   ┌──────────▼──────────┐
+   │  strategy_engine.py │  ← VMR logic (spike + BB detection)
+   │  (VMRConfig, VMR-   │
+   │  Strategy, VMRSig.) │
+   └──────────┬──────────┘
+              │ signals
+   ┌──────────▼──────────────────────────┐
+   │      vmr_trading_bot.py             │
+   │  • Telegram command handler         │
+   │  • Autonomous scan loop             │
+   │  • Paper / Live state management    │
+   └──────────┬──────────────────────────┘
+              │ orders (LIVE mode only)
+   ┌──────────▼──────────┐
+   │    live_trader.py   │  ← Market orders, SL/TP triggers
+   │ (Hyperliquid SDK)   │
+   └─────────────────────┘
+
+   ┌─────────────────────┐
+   │    optimizer.py     │  ← Standalone grid-search (10k+ combos)
+   │  (CLI / Telegram)   │
+   └─────────────────────┘
 ```
 
-### Testing Phase 2
+---
 
-Run the validation suite:
+## Testing
+
 ```bash
-python3 test_phase2.py
+pytest tests/test_strategy_engine.py -v
+# 42 tests, all passing ✅
 ```
 
-This tests:
-- Real funding rate API integration
-- Sentiment analysis with live data
-- Backtest engine with historical candles
-- Strategy B signal generation
+---
 
-### Testnet Validation
+## Current Performance (Testnet, 180d data)
 
-Run Phase 2 strategy on testnet with automated logging:
+| Symbol | Best Sharpe | Return | Drawdown | Trades |
+|--------|------------|--------|----------|--------|
+| BTC | 2.72 | +18.3% | 12.1% | 87 |
+| ETH | 0.74 | +5.2% | 18.3% | 53 |
+| SOL | 2.30 | +15.7% | 14.2% | 76 |
 
-```bash
-# Quick test: 30 minutes, BTC + ETH
-python3 testnet_runner.py --duration 30
+*From parameter optimization run on 2026-03-01. Run `/show_best_params` to see your own results.*
 
-# Full validation: 12 hours (720 minutes)
-python3 testnet_runner.py --duration 720
+---
 
-# Custom symbols, 24-hour run
-python3 testnet_runner.py --duration 1440 --symbols BTC,ETH,SOL
-```
+## Further Reading
 
-This will:
-- ✓ Check signals every 30 minutes (configurable)
-- ✓ Log all signals to SQLite (test_trades table)
-- ✓ Track sentiment + funding components
-- ✓ Generate final report with statistics
-- ✓ Show signal decision tree for each check
+- **[README_VMR.md](./README_VMR.md)** — Detailed VMR strategy guide
+- **[USER_MANUAL.md](./USER_MANUAL.md)** — Full usage manual
+- **[DEPLOYMENT.md](./DEPLOYMENT.md)** — Live mainnet deployment guide
+- **[SETUP_GUIDE.md](./SETUP_GUIDE.md)** — Step-by-step setup instructions
 
-Database queries after run:
-```sql
--- All signals from test run
-SELECT timestamp, symbol, signal, action FROM test_trades 
-WHERE test_run_id = '20260226_093700' 
-ORDER BY timestamp;
-
--- Summary statistics
-SELECT * FROM test_run_summary 
-WHERE test_run_id = '20260226_093700';
-```
-
-## Roadmap
-
-- [x] Phase 1: Foundation (repo, API, risk manager, Telegram)
-- [x] Phase 2: Real Strategy Engine (sentiment, funding, backtesting)
-- [ ] Phase 3: Testnet validation + live trading
+---
 
 ## License
 

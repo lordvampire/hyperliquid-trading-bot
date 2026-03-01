@@ -1,4 +1,14 @@
-# v2 Implementation Status — Current Snapshot
+> ⚠️ **ARCHIVED — Historical Planning Document**
+> 
+> This was the status snapshot for the v2 multi-signal framework as of February 26, 2026.
+> The production bot evolved to the **VMR (Volatility Mean Reversion)** strategy instead.
+> The v2 signal code (`v2/signals/`) was completed but is NOT used by the main bot.
+> 
+> **Current documentation:** See [README.md](../README.md), [README_VMR.md](../README_VMR.md), [USER_MANUAL.md](../USER_MANUAL.md).
+
+---
+
+# v2 Implementation Status — Historical Snapshot (ARCHIVED)
 
 **Date:** 2026-02-26 23:40 UTC  
 **Overall Progress:** Phase 1, 50% Complete (2/4 Tasks Done)

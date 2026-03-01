@@ -1,17 +1,18 @@
 # 🚀 DEPLOYMENT.md — Live Trading Runbook
 
-**Hyperliquid Trading Bot — Phase 4 Production Guide**
+**Hyperliquid Trading Bot — VMR Strategy, Production Guide**
 
 ---
 
 ## Overview
 
-Phase 4 adds production-grade safety guards, audit logging, and live trading
-orchestration. Every trade passes through `SafetyManager` before execution.
+The VMR (Volatility Mean Reversion) bot detects hourly price spikes and enters mean-reversion trades. Production flow:
 
 ```
-Signal → check_pre_trade() → PositionSizer → Exchange → log_trade()
+Signal detected → VMRStrategy.analyze() → LiveTrader.place_order() → Hyperliquid API
 ```
+
+All safety guards (position limits, daily loss cap, max hold time) are enforced in `strategy_engine.py` and `vmr_trading_bot.py`.
 
 ---
 
@@ -19,161 +20,187 @@ Signal → check_pre_trade() → PositionSizer → Exchange → log_trade()
 
 Before going live, verify:
 
-- [ ] `config/base.yaml` has correct `telegram.admin_user_ids`
-- [ ] `.env` has valid `HL_SECRET_KEY`, `HL_WALLET_ADDRESS`, `TELEGRAM_BOT_TOKEN`
-- [ ] `HL_TESTNET=false` for mainnet (default is testnet)
-- [ ] `deployment.starting_capital` set to your intended amount
-- [ ] Run full test suite: `python -m pytest tests/ -v`
-- [ ] Paper trade first: `/paper_trade BTC 14`
-- [ ] Optimize params: `/optimize BTC 30`
+- [ ] `.env` has valid `HL_SECRET_KEY`, `HL_WALLET_ADDRESS`
+- [ ] `HL_TESTNET=true` for testnet, `HL_TESTNET=false` for mainnet
+- [ ] `HL_DRY_RUN=false` (set `true` first to confirm orders validate)
+- [ ] `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set and tested
+- [ ] Run test suite: `pytest tests/ -v`
+- [ ] Run optimizer: `/optimize BTC ETH SOL`
+- [ ] Validate results: `/backtest BTC 30`
+- [ ] Review params: `/show_best_params`
 
 ---
 
-## Safety Configuration (`config/base.yaml`)
+## Environment Variables (`.env`)
 
-```yaml
-safety:
-  max_daily_dd_pct: 5.0          # Circuit breaker: stop if daily loss ≥ 5%
-  max_leverage: 35               # Hard stop if leverage > 35x; warn at 30x
-  max_slippage_pct: 2.0          # Reject trade if estimated slippage > 2%
-  network_latency_limit_ms: 2000 # Reject if API latency > 2 seconds
-  audit_log_path: "logs/audit.log"
+```env
+# Hyperliquid credentials
+HL_SECRET_KEY=0x...                  # Private key (required for LIVE mode)
+HL_WALLET_ADDRESS=0x...             # Wallet address
+HL_TESTNET=true                     # true = testnet, false = mainnet
+HL_DRY_RUN=false                    # true = pre-flight only, no orders sent
 
-deployment:
-  strategy: "strategy_b"
-  mode: "backtest"               # Change to "live" for mainnet
-  starting_capital: 1000.0
-  email_reports: true
-  report_time_utc: "18:00"       # Daily report at 7 PM Berlin
+# Telegram
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+TELEGRAM_CHAT_ID=5890731372
 
-telegram:
-  admin_user_ids: [5890731372]   # Faruk's Telegram ID
+# Paper trading (used when HL_SECRET_KEY is NOT set)
+PAPER_BALANCE=10000.0
+```
+
+> **Mode Detection:**
+> - `HL_SECRET_KEY` present → **LIVE mode** (real orders)
+> - `HL_SECRET_KEY` absent  → **PAPER mode** (simulation)
+> - `HL_DRY_RUN=true`       → **DRY RUN** (validates, no orders)
+
+---
+
+## VMR Strategy Configuration
+
+All parameters live in `VMRConfig` inside `strategy_engine.py`. Change them once — backtest, paper, and live modes all pick up the change.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `spike_threshold_pct` | 1.0 | 1h return (%) to trigger spike |
+| `bb_std_multiplier` | 2.0 | Bollinger Band width multiplier |
+| `sl_pct` | 0.005 | Stop-loss fraction (0.005 = 0.5%) |
+| `tp_pct` | 0.015 | Take-profit fraction (0.015 = 1.5%) |
+| `position_size_pct` | 0.01 | Fraction of account per trade (1%) |
+| `max_hold_hours` | 24 | Max hours to hold position |
+| `daily_loss_limit_pct` | 0.05 | Max daily loss (5%) |
+| `max_open_positions` | 3 | Max concurrent positions |
+| `scan_interval_seconds` | 900 | Scan every 15 minutes |
+| `symbols` | BTC, ETH, SOL | Instruments to trade |
+
+To update params live (without restart):
+```
+/set_params spike=1.0 bb_mult=3.0 sl=0.006 tp=0.025 size=0.01 hold=12
 ```
 
 ---
 
-## Telegram Commands (Phase 4)
+## Telegram Commands (Production)
 
-### `/optimize [symbol] [days]`
-Runs sensitivity analysis + grid search. Saves best params to `param_history.json`.
+### `/start_auto`
+Launches the autonomous trading loop. Scans all configured symbols every 15 minutes.
 
-```
-/optimize BTC 30
-/optimize ETH 14
-```
+### `/stop_auto`
+Stops the loop. Existing positions remain open — you must close them manually or wait for SL/TP.
 
-### `/paper_trade [symbol] [days]`
-Simulates live trading on recent data. Reports P&L and detects model drift.
+### `/stop_all`
+Stops loop **and** closes all open positions at market price (emergency stop).
 
-```
-/paper_trade BTC 14
-/paper_trade SOL 7
-```
+### `/status`
+Shows current open positions, unrealized P&L, account balance, loop info.
 
-### `/go_live [symbol] [amount]`
-🔴 **ADMIN ONLY** — Starts live trading.
+### `/optimize [BTC|ETH|SOL]`
+Runs parameter grid search (~10,000 combinations) for the given symbol.
 
 ```
-/go_live BTC 500
+/optimize BTC
+/optimize BTC ETH SOL
 ```
 
-- Checks your Telegram `user_id` against `admin_user_ids` in config
-- Writes audit trail entry for the go-live event
-- All subsequent signals go through SafetyManager before execution
+Results saved to `optimization_results/` and top-3 to `best_params.json`.
+
+### `/show_best_params`
+Displays top-3 parameter sets from the last optimization run.
+
+### `/backtest [symbol] [days]`
+Backtests the current (or optimized) params on real historical data.
+
+```
+/backtest BTC 30
+/backtest BTC 30 --use-optimized-params
+```
+
+### `/set_params spike=X bb_mult=Y sl=Z tp=W size=V hold=H`
+Updates VMR parameters live (takes effect immediately, without restart).
+
+### `/balance`
+Shows account balance and risk limits.
+
+### `/mode`
+Shows current trading mode: LIVE / PAPER / DRY-RUN.
 
 ---
 
-## Circuit Breaker
+## Risk Guards
 
-The circuit breaker automatically halts trading when:
-
-| Condition | Limit | Action |
-|-----------|-------|--------|
-| Daily loss | ≥ 5% of starting balance | Block all new trades |
-| Leverage | > 35x | Reject signal |
-| Slippage est. | > 2% | Reject signal |
-| API latency | > 2 seconds | Reject signal |
-| Signal strength | < 0.2 | Reject (insufficient liquidity signal) |
-
-**To reset the circuit breaker:**  
-Wait for daily reset (00:00 UTC) or restart the bot.
+| Condition | Limit | Behaviour |
+|-----------|-------|-----------|
+| Daily P&L loss | ≥ 5% of balance | Bot stops opening new positions |
+| Open positions | ≥ 3 | New signals are skipped |
+| Position hold time | ≥ 24h | Forced exit at market |
+| Stop-loss hit | 0.5% below entry | Position closed immediately |
+| Take-profit hit | 1.5% above entry | Position closed, profit realised |
 
 ---
 
-## Audit Log
+## Audit Logging
 
-Every trade action is written to `logs/audit.log` (append-only, JSONL format).
+Every trade attempt is logged to `vmr_bot.log` (append-only):
 
 ```
-{"timestamp": "...", "trade_id": "T-...", "symbol": "BTC", "direction": "LONG",
- "entry_price": 45000, "size": 0.001, "status": "executed", "pnl": 0.0, ...}
+2026-03-01 12:30:00 - [INFO] - ✅ LONG BTC — entry $64,400 | SL $64,080 | TP $65,360
+2026-03-01 14:15:00 - [INFO] - 🎯 TP hit BTC — closed @ $65,360 | P&L +$153.60
 ```
-
-**Archived daily** at `logs/audit_YYYY-MM-DD.log`  
-**Daily report** at `logs/report_YYYY-MM-DD.html`
 
 ---
 
 ## Step-by-Step: Going Live
 
-### 1. Configure environment
+### 1. Set up environment
 
 ```bash
 cd ~/hyperliquid-trading-bot
 cp example.env .env
 nano .env
-# Set: HL_SECRET_KEY, HL_WALLET_ADDRESS, TELEGRAM_BOT_TOKEN, HL_TESTNET=false
+# Set: HL_SECRET_KEY, HL_WALLET_ADDRESS, TELEGRAM_BOT_TOKEN, HL_TESTNET=true
 ```
 
 ### 2. Run final tests
 
 ```bash
 source venv/bin/activate
-python -m pytest tests/ -v
+pytest tests/ -v
 ```
 
-### 3. Verify safety manager
+### 3. Dry-run validation
 
 ```bash
-python -c "
-from safety_manager import SafetyManager
-from config.manager import ConfigManager
-config = ConfigManager('config/base.yaml', 'live')
-safety = SafetyManager(config)
-print(f'✅ SafetyManager ready')
-print(f'   Max daily DD: {safety.max_daily_dd_pct}%')
-print(f'   Max leverage: {safety.max_leverage}x')
-print(f'   Network healthy: {safety.check_network_health()}')
-"
+# Set HL_DRY_RUN=true in .env first
+python vmr_trading_bot.py
+# In Telegram: /start_auto
+# Watch logs — orders should show DRY-RUN label
 ```
 
-### 4. Paper trade first (≥ 2 weeks recommended)
+### 4. Optimize parameters
 
 ```
-Telegram → /paper_trade BTC 14
+Telegram → /optimize BTC ETH SOL
+# Wait 5–15 min for results
+Telegram → /show_best_params
+Telegram → /backtest BTC 30
 ```
 
-Review results. If divergence alerts appear → re-optimize before going live.
-
-### 5. Optimize parameters
+### 5. Go live with small capital
 
 ```
-Telegram → /optimize BTC 30
+# Set HL_DRY_RUN=false in .env
+# Restart: python vmr_trading_bot.py
+Telegram → /set_params spike=1.0 bb_mult=2.0 sl=0.005 tp=0.015 size=0.01 hold=24
+Telegram → /start_auto
 ```
 
-### 6. Go live with small capital
+Start with 1% position size and low capital. Monitor via `/status`.
+
+### 6. Monitor
 
 ```
-Telegram → /go_live BTC 100
-```
-
-Start with $100–500 to verify the pipeline before scaling up.
-
-### 7. Monitor
-
-```
-Telegram → /status    (shows safety check summary)
-Telegram → /risk      (shows circuit breaker status)
+/status    → open positions, P&L, loop health
+/stats     → completed trade statistics
+/balance   → account balance, daily loss
 ```
 
 ---
@@ -182,79 +209,68 @@ Telegram → /risk      (shows circuit breaker status)
 
 ### Stop trading immediately
 
-```bash
-# Kill the bot process
-pkill -f "python bot.py"
+```
+Telegram → /stop_all
 ```
 
-Or via Telegram:
-```
-/shutdown
-```
-
-### Close all positions manually
-
-Log in to [app.hyperliquid.xyz](https://app.hyperliquid.xyz) and close positions manually.
-The bot currently does **not** auto-close on shutdown — always verify open positions.
-
-### Review audit log
+Or kill the process:
 
 ```bash
-tail -f logs/audit.log | python -m json.tool
+pkill -f "python vmr_trading_bot.py"
+```
+
+### Close positions manually
+
+Log in to [app.hyperliquid.xyz](https://app.hyperliquid.xyz) and close positions from the UI.
+
+### Review logs
+
+```bash
+tail -100 vmr_bot.log
 ```
 
 ---
 
 ## Daily Operations
 
-| Time (UTC) | Action |
-|------------|--------|
-| 00:00 | Daily reset — P&L counter resets, logs archived |
-| 18:00 | Daily report generated (`logs/report_YYYY-MM-DD.html`) |
-| Continuous | Circuit breaker monitors every signal |
+| Action | When |
+|--------|------|
+| Check `/status` | Morning and evening |
+| Review `vmr_bot.log` | If any alerts |
+| Re-optimize | Weekly or after market regime change |
+| Update params with `/set_params` | After reviewing optimization results |
 
 ---
 
 ## Rollback Procedure
 
-If anything goes wrong:
-
-1. `pkill -f "python bot.py"` — stop the bot
-2. Close all open positions on Hyperliquid web UI
-3. Review `logs/audit.log` to understand what happened
-4. Fix the bug
-5. Run `python -m pytest tests/ -v` — all must pass
-6. Restart with `/go_live [symbol] [small_amount]`
+1. `/stop_all` — stop bot and close all positions
+2. Review `vmr_bot.log` to understand what happened
+3. Fix the bug or parameter issue
+4. `pytest tests/ -v` — confirm all pass
+5. `/optimize BTC` — refresh parameters
+6. Restart with small position size: `/set_params size=0.005`
+7. `/start_auto` — resume
 
 ---
 
-## Architecture
+## Architecture Reference
 
 ```
-bot.py
-  ├── /optimize  → OptimizationRunner (sensitivity + grid + Optuna)
-  ├── /paper_trade → PaperTrader (simulate on real data)
-  └── /go_live   → LiveDeployment
-                        ├── SafetyManager (circuit breaker + audit)
-                        ├── PositionSizer (dynamic sizing)
-                        ├── HyperliquidExchange (order placement)
-                        └── ParameterRegistry (run tracking)
+vmr_trading_bot.py
+  ├── /start_auto     → Autonomous loop (15-min scans)
+  ├── /stop_auto      → Pause loop
+  ├── /stop_all       → Emergency: pause + close all
+  ├── /optimize       → Spawns optimizer.py subprocess
+  ├── /backtest       → Runs VMRStrategy.run_backtest()
+  ├── /set_params     → Updates VMRConfig live
+  └── /status, /stats, /balance, /mode, /signals, /analyze
+
+strategy_engine.py   ← VMRConfig + VMRStrategy (single source of truth)
+live_trader.py       ← Hyperliquid SDK: market_open, market_close, orders
+optimizer.py         ← Grid search over 10,000+ param combinations
 ```
 
 ---
 
-## Configuration Reference
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `safety.max_daily_dd_pct` | 5.0 | Max daily loss % before circuit breaker |
-| `safety.max_leverage` | 35 | Hard leverage cap |
-| `safety.max_slippage_pct` | 2.0 | Max acceptable slippage |
-| `safety.network_latency_limit_ms` | 2000 | Max API latency (ms) |
-| `deployment.starting_capital` | 1000.0 | Initial capital (USD) |
-| `deployment.mode` | backtest | Trading mode |
-| `telegram.admin_user_ids` | [5890731372] | Telegram IDs allowed to /go_live |
-
----
-
-_Phase 4 complete. Production-ready with safety guards. Start small, verify, scale._
+_VMR strategy, production-ready. Start small, verify, scale._

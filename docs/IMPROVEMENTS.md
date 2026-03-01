@@ -1,6 +1,16 @@
-# Bot Improvements: v1 → v2 Roadmap
+> ⚠️ **ARCHIVED — Historical Planning Document**
+> 
+> This document described the planned improvements from v1 (funding-rate heuristic) to v2 (multi-signal framework).
+> The production bot was instead built as the **VMR (Volatility Mean Reversion)** strategy.
+> Many of the improvements described here informed VMR's design (adaptive signals, dynamic risk).
+> 
+> **Current documentation:** See [README.md](../README.md), [README_VMR.md](../README_VMR.md), [USER_MANUAL.md](../USER_MANUAL.md).
 
-**Status:** Planning Phase  
+---
+
+# Bot Improvements: v1 → v2 Roadmap (ARCHIVED)
+
+**Status:** Planning Phase (archived — superseded by VMR strategy)  
 **Target Release:** 2026-Q1  
 **Priority:** Multi-Signal + Risk Overhaul + Stress-Testing
 

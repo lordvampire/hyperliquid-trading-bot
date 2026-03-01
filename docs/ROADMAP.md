@@ -1,6 +1,16 @@
-# Implementation Roadmap: v2 Multi-Signal Bot
+> ⚠️ **ARCHIVED — Historical Planning Document**
+> 
+> This was the 4-week implementation roadmap for the v2 multi-signal framework, written in February 2026.
+> The production bot took a different path and was built as the **VMR (Volatility Mean Reversion)** strategy.
+> The v2 signal code was built but never deployed as the main bot.
+> 
+> **Current documentation:** See [README.md](../README.md), [DEPLOYMENT.md](../DEPLOYMENT.md), [README_VMR.md](../README_VMR.md).
 
-**Status:** Planning  
+---
+
+# Implementation Roadmap: v2 Multi-Signal Bot (ARCHIVED)
+
+**Status:** Planning (archived — superseded by VMR strategy)  
 **Estimated Duration:** 4 weeks  
 **Target Launch:** 2026-03-26 (Mainnet)  
 **Team:** Clara (Orchestration) + 6 Agents (Dev, QA, Research)

@@ -1,10 +1,20 @@
-# Orchestration Control Panel
-**v2 Multi-Signal Bot — Master Control**
+> ⚠️ **ARCHIVED — Historical Planning Document**
+> 
+> This was the orchestration control panel for the v2 multi-signal development, run in February 2026.
+> The orchestrator session described here is no longer active.
+> The production bot is the **VMR (Volatility Mean Reversion)** strategy (`vmr_trading_bot.py`).
+> 
+> **Current documentation:** See [README.md](../README.md), [DEPLOYMENT.md](../DEPLOYMENT.md).
 
-**Status:** ACTIVE (2026-02-26 23:06 PM)  
-**Orchestrator Agent:** Running (persistent session)  
-**Auto-Spawn Mode:** Enabled  
-**Daily Reports:** Yes (message-based)
+---
+
+# Orchestration Control Panel (ARCHIVED)
+**v2 Multi-Signal Bot — Historical Master Control**
+
+**Status:** ARCHIVED (was active 2026-02-26 23:06 PM)  
+**Orchestrator Agent:** No longer running  
+**Auto-Spawn Mode:** N/A  
+**Daily Reports:** N/A
 
 ---
 

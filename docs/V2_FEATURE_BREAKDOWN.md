@@ -1,8 +1,18 @@
-# v2 Feature Breakdown: Detailed Component Guide
+> ⚠️ **ARCHIVED — Historical Planning Document**
+> 
+> This document describes the original v2 multi-signal framework planned in February 2026.
+> The production bot evolved to the **VMR (Volatility Mean Reversion)** strategy instead.
+> The v2 signal code (`v2/signals/`) was built but is NOT used by the main bot.
+> 
+> **Current documentation:** See [README.md](../README.md), [README_VMR.md](../README_VMR.md), [USER_MANUAL.md](../USER_MANUAL.md).
+
+---
+
+# v2 Feature Breakdown: Detailed Component Guide (ARCHIVED)
 
 **Purpose:** Explain every new v2 feature, its purpose, and why it matters  
 **Audience:** Traders, developers, investors  
-**Last Updated:** 2026-02-26
+**Last Updated:** 2026-02-26 (archived 2026-03-01)
 
 ---
 

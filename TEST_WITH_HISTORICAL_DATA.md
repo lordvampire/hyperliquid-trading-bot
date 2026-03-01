@@ -1,221 +1,238 @@
-# Testing with Historical Data
+# Testing with Historical Data — VMR Strategy
 ## Quick Reference Guide
 
 ---
 
-## 📊 TEST SCENARIO: Optimize Strategy B on 90 Days of Data
+## 📊 TEST SCENARIO: Optimize VMR on Historical Data
 
-### Option A: FULL OPTIMIZATION (75 minutes)
-**Complete parameter tuning cycle**
-
-```bash
-# Via Telegram
-/optimize BTC 90
-```
-
-This runs:
-1. **Sensitivity Analysis (10 min)** 
-   - Identifies which params matter
-   
-2. **Grid Search (20-30 min)**
-   - Tests 343 parameter combinations
-   - Records top 10 results
-   
-3. **Optuna Fine-tuning (30-40 min)**
-   - Bayesian optimization
-   - Refines best params
-   
-4. **Walk-Forward Validation (15 min)**
-   - Tests on unseen data windows
-   - Detects overfitting
-   
-5. **Output**
-   - Best params saved to `param_history.json`
-   - Results: Sharpe, Max DD, Win Rate
-
-**Expected Result:** Optimized parameters ready for deployment
+The VMR optimizer fetches real 1h OHLCV candles from Hyperliquid and tests ~10,000 parameter combinations to find the best settings.
 
 ---
 
-### Option B: QUICK TEST (20 minutes)
-**Fast parameter tuning without Optuna**
+### Option A: FULL OPTIMIZATION (5–15 min per symbol)
+**Complete parameter tuning on 180 days of data**
 
 ```bash
 # Via Telegram
-/paper_trade BTC 14
+/optimize BTC
+/optimize BTC ETH SOL   # All 3 symbols
 ```
 
-Or in Python:
-```python
-from paper_trader import PaperTrader
-from strategies.strategy_b import StrategyB
-from config.manager import ConfigManager
-
-config = ConfigManager('config/base.yaml', 'backtest')
-strategy = StrategyB(config.strategy('strategy_b'), 'backtest')
-trader = PaperTrader(strategy, config)
-
-result = trader.paper_trade('BTC', starting_balance=1000, duration_days=14)
-print(f"P&L: ${result['total_pnl']:.2f}")
-print(f"Trades: {result['trades_executed']}")
-print(f"Max DD: {result['max_dd']:.2%}")
-```
-
-**Expected Result:** Realistic P&L simulation with costs
-
----
-
-### Option C: MANUAL VALIDATION (5 minutes)
-**Test the framework without optimization**
-
+Or via CLI:
 ```bash
 cd ~/hyperliquid-trading-bot
-python test_with_historical_data.py
+source venv/bin/activate
+python optimizer.py               # BTC, ETH, SOL all
+python optimizer.py --symbol BTC  # Single symbol
+python optimizer.py --workers 8   # Parallel (faster)
 ```
 
-This verifies:
-- ✅ Strategy B loads
-- ✅ Optimizer ready
-- ✅ Walk-forward validator ready
-- ✅ Paper trader ready
-- ✅ Safety guards active
+**What it tests:**
+
+| Parameter | Grid |
+|-----------|------|
+| `spike_threshold_pct` | 0.5, 0.75, 1.0, 1.25, 1.5 |
+| `bb_std_multiplier` | 1.0, 1.5, 2.0, 2.5, 3.0 |
+| `sl_pct` | 0.003, 0.004, 0.005, 0.006, 0.007 |
+| `tp_pct` | 0.010, 0.012, 0.015, 0.020, 0.025 |
+| `position_size_pct` | 0.005, 0.01, 0.015, 0.02 |
+| `max_hold_hours` | 12, 24, 36, 48 |
+
+**Output:**
+- `optimization_results/optimization_results_BTC_<DATE>.csv`
+- `optimization_results/optimization_summary.md`
+- `best_params.json` (top-3 combos)
+- Top 10 results sent to Telegram
+
+**Expected Result:** Best params ready for live deployment
+
+---
+
+### Option B: BACKTEST ON RECENT DATA (1–5 min)
+**Validate params on out-of-sample data before going live**
+
+```bash
+# Via Telegram
+/backtest BTC 30                          # Last 30 days, current params
+/backtest BTC 30 --use-optimized-params   # Last 30 days, best optimized params
+/backtest ETH 14                          # 14 days
+```
+
+**Expected Result:**
+```
+✅ Backtest Results — BTC (last 30 days)
+Sharpe: 2.14 | Return: +3.2% | Drawdown: 8.1% | Trades: 24
+Status: READY TO TRADE
+```
+
+**What to look for:**
+- **Sharpe > 1.0** — Good risk-adjusted returns
+- **Win Rate > 55%** — More wins than losses
+- **Max DD < 20%** — Acceptable drawdown
+- **Trades ≥ 20** — Statistical relevance
+
+---
+
+### Option C: QUICK SIGNAL CHECK (instant)
+**Test framework without optimization**
+
+In Telegram:
+```
+/analyze BTC
+```
+
+Shows:
+- ✅ Current spike detection status
+- ✅ Bollinger Band reading (upper/lower/current)
+- ✅ Signal: LONG / SHORT / NONE
+- ✅ Entry, SL, TP prices
+
+Or run the strategy directly:
+```bash
+python3 -c "
+from strategy_engine import VMRConfig, VMRStrategy
+from vmr_trading_bot import DataFetcher
+
+config   = VMRConfig()
+strategy = VMRStrategy(config)
+fetcher  = DataFetcher()
+df       = fetcher.get_candles('BTC', days=7)
+signal   = strategy.analyze(df, 'BTC')
+print(f'Signal: {signal.direction}')
+print(f'Confidence: {signal.confidence:.2f}')
+print(f'Reason: {signal.reason}')
+"
+```
 
 ---
 
 ## 🎯 RECOMMENDED TEST FLOW
 
-### Week 1: Validation Phase
+### Before Live Trading
+
 ```
-Day 1: Run Option C (5 min)
-       → Verify all components work
+Day 1: Option C — Quick signal check
+        → Does strategy detect signals on today's data?
 
-Day 2: Run Option B - Paper Trade (20 min)
-       → Check realistic P&L
-       → Detect any issues
+Day 2: Option A — Run full optimization
+        → What params work best on 180d history?
 
-Day 3: Run Option A - Full Optimization (75 min)
-       → Get best parameters
-       → Validate with walk-forward
-```
+Day 3: Option B — Backtest with optimized params
+        → Do the best params hold up on the last 30 days (out-of-sample)?
 
-### Week 2: Deployment Phase
-```
-Day 8: Take optimized params from Day 3
-       → Load into bot config
-       
-Day 9: Run paper_trade with optimized params (14 days)
-       → Compare backtest vs real simulation
-       → Verify safety guards trigger correctly
+Day 4: Paper Trading — Start loop in paper mode
+        /start_auto   (with HL_SECRET_KEY removed from .env)
+        → Monitor for 1–2 days
 
-Day 16: If paper trade successful
-        → Switch to mainnet with $500 starting capital
-        → Monitor daily via /status
-        → Review audit logs
+Day 5+: Go Live on Testnet
+        (set HL_SECRET_KEY in .env, keep HL_TESTNET=true)
+        /set_params size=0.005   # Start small
+        /start_auto
 ```
 
 ---
 
 ## 📈 INTERPRETING RESULTS
 
-### Paper Trading Output
+### Optimization Output Example
+
+```
+🏆 Top 3 Parameter Sets
+
+#1: spike=1.0% | bb=3.0 | sl=0.6% | tp=2.5% | size=1% | hold=12h
+   BTC Sharpe: 2.72 | Return: +18.3% | Drawdown: 12.1% | Trades: 87
+
+#2: spike=0.8% | bb=2.5 | sl=0.5% | tp=2.0% | size=1% | hold=12h
+   BTC Sharpe: 2.61 | Return: +17.1% | Drawdown: 13.2% | Trades: 92
+```
+
+**What to pick:**
+- **Conservative:** `sharpe > 1.5`, `drawdown < 15%`, `win_rate > 65%`
+- **Balanced:** Top result from `/show_best_params` (optimized for Sharpe)
+- **Aggressive:** `sharpe > 2.0`, `return > 15%` (accept higher drawdown)
+
+### Backtest Output Example
+
 ```
 ✅ Paper trade complete!
-   - P&L: $-10.87 (-1.09%)
-   - Trades executed: 17
-   - Max drawdown: 141.03%
+   P&L: +$183.50 (+1.84%)
+   Trades: 24
+   Win Rate: 68%
+   Max Drawdown: 8.3%
 ```
-
-**What this means:**
-- **P&L = -$10.87:** Lost $10.87 on $1000 (unrealistic high DD due to small account)
-- **Trades = 17:** Generated 17 signal trades in 7 days (reasonable)
-- **Max DD = 141%:** Measurement artifact (small account, synthetic data) - ignore
-
-**For real data with bigger account:** DD < 10% is good
-
----
-
-### Optimization Output
-```
-Best Sharpe: 0.85
-Best Params: {
-  "fast_period": 8,
-  "slow_period": 24,
-  "momentum_weight": 0.55,
-  "rsi_weight": 0.35,
-  "entry_threshold": 0.35
-}
-Win Rate: 52.1%
-Max DD: 8.3%
-```
-
-**What to look for:**
-- **Sharpe > 0.8:** Good risk-adjusted returns
-- **Win Rate > 50%:** More wins than losses
-- **Max DD < 15%:** Reasonable drawdown limit
-- **Walk-forward consistent:** Results don't vary wildly
 
 ---
 
 ## ⚠️ SAFETY CHECKS (Before Going Live)
 
-Always verify these before `/go_live`:
+Always verify these before `/start_auto` in LIVE mode:
 
-1. **Circuit Breaker Works**
-   ```bash
-   /status
-   # Should show "Can Trade: Yes" if daily P&L > -5%
+1. **Params validated via backtest**
    ```
-
-2. **Leverage Capped**
-   ```
-   Max leverage in config: 35x
-   Expected trade leverage: 1-3x
+   /backtest BTC 30 --use-optimized-params
+   # Sharpe > 1.0 and drawdown < 20%
    ```
 
-3. **Position Sizing Correct**
+2. **Mode confirmed**
    ```
-   Position size = balance × volatility_factor × signal_strength
-   Example: $1000 × 1.0 × 0.5 = ~$500 per trade (50% of account)
+   /mode
+   # Should show LIVE (or PAPER if still testing)
    ```
 
-4. **Audit Logging Active**
-   ```bash
-   tail -f logs/audit.log
-   # Should show every trade with timestamp + details
+3. **Balance visible**
+   ```
+   /balance
+   # Shows real balance from Hyperliquid
+   ```
+
+4. **Daily loss limit set**
+   ```
+   # In strategy_engine.py: daily_loss_limit_pct = 0.05 (5%)
+   # Bot stops new trades if daily loss ≥ 5%
+   ```
+
+5. **Position size small**
+   ```
+   /set_params size=0.005   # 0.5% per trade — start conservative
    ```
 
 ---
 
 ## 🚀 GOING LIVE CHECKLIST
 
-Before `/go_live BTC 500`:
+Before `/start_auto` with real money:
 
-- [ ] Ran optimization on 90+ days of data
-- [ ] Walk-forward validation shows consistent results (Sharpe std < 0.3)
-- [ ] Paper trade test successful (7-14 days)
-- [ ] Safety guards tested (circuit breaker, leverage limits)
-- [ ] Audit logging verified
-- [ ] Backup strategy params (save param_history.json)
-- [ ] Small starting capital ($500) - don't risk big money
-- [ ] Monitor daily via `/status` command
-- [ ] Review daily reports via email
+- [ ] Ran `/optimize BTC ETH SOL` and reviewed results
+- [ ] Ran `/backtest BTC 30 --use-optimized-params` — Sharpe > 1.0, DD < 20%
+- [ ] Paper-traded 24–48h with loop running
+- [ ] `/mode` shows correct mode (LIVE/PAPER)
+- [ ] Position size is small (`size=0.005` to start)
+- [ ] `HL_TESTNET=true` confirmed before going mainnet
+- [ ] `best_params.json` saved as backup
 
 ---
 
 ## 📊 MONITORING AFTER LIVE START
 
 ```bash
-# Daily checks
-/status              # Current balance, open positions, P&L
-/risk                # Risk metrics, circuit breaker status
-tail -f logs/audit.log  # Trade audit trail
+# In Telegram
+/status       # Current positions, unrealised P&L, loop health
+/stats        # Completed trades, win rate, total P&L
+/balance      # Account balance, daily P&L, loss limit status
+
+# Log file
+tail -f vmr_bot.log   # Real-time activity log
 ```
 
 **Kill-switch (emergency stop):**
 ```
-If daily loss >= 5% → circuit breaker auto-stops trading
-Max leverage > 35x → trade rejected
-Network latency > 2s → trading paused
+/stop_all     # Telegram: stops loop + closes all positions at market
+```
+
+Or via shell:
+```bash
+pkill -f "python vmr_trading_bot.py"
+# Then log in to app.hyperliquid.xyz to close open positions
 ```
 
 ---
@@ -224,33 +241,38 @@ Network latency > 2s → trading paused
 
 After first week of live trading:
 
-- [ ] Adjust entry_threshold based on signal accuracy
-- [ ] Check win rate (target: >50%)
-- [ ] Monitor max drawdown (should stay <10% on good days)
+- [ ] Check win rate via `/stats` (target: > 55%)
+- [ ] Check max drawdown (should be < 15% with default params)
 - [ ] Review Sharpe ratio trend
-- [ ] Adjust position size if needed
-- [ ] Rerun optimization every 2-4 weeks with new data
+- [ ] If too few trades: lower `spike_threshold_pct`
+  - `/set_params spike=0.7`
+- [ ] If too many losing trades: raise threshold or tighten filter
+  - `/set_params spike=1.2 bb_mult=2.5`
+- [ ] Re-run `/optimize` every 2–4 weeks with fresh data
 
 ---
 
 ## 💡 QUICK REFERENCE
 
-| Command | Time | Purpose |
-|---------|------|---------|
-| `/optimize BTC 90` | 75 min | Full parameter optimization |
-| `/paper_trade BTC 14` | 10 min | Reality-check simulation |
-| `/status` | 1 sec | Current position status |
-| `/risk` | 1 sec | Risk metrics |
-| `/go_live BTC 500` | 5 sec | START LIVE TRADING |
+| Action | Command / Tool | Time |
+|--------|---------------|------|
+| Run full optimization | `/optimize BTC ETH SOL` | 5–15 min |
+| Quick backtest | `/backtest BTC 30` | 1–3 min |
+| Check current signal | `/analyze BTC` | instant |
+| Show best params | `/show_best_params` | instant |
+| Update params | `/set_params spike=1.0 ...` | instant |
+| Start trading | `/start_auto` | instant |
+| Emergency stop | `/stop_all` | instant |
+| Run CLI optimizer | `python optimizer.py --symbol BTC` | 5–15 min |
 
 ---
 
 ## ✅ You're Ready!
 
-- ✅ Full optimization framework built
-- ✅ Paper trading simulator ready
-- ✅ Safety guards active
-- ✅ Audit logging enabled
-- ✅ Historical data testing available
+- ✅ VMR signal detection built and tested
+- ✅ Parameter optimization covers 10,000+ combinations
+- ✅ Backtest uses real Hyperliquid 1h candle data (no synthetic data)
+- ✅ Paper trading mode for risk-free validation
+- ✅ Telegram commands for full control
 
 **Pick an option above and start testing!** 🎯

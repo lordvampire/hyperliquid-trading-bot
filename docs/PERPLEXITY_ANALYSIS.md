@@ -1,7 +1,20 @@
+> 📌 **Historical Analysis — Still Valid as Background**
+> 
+> This analysis critiqued the v1 funding-rate strategy (strategy_b) and identified its weaknesses.
+> Many of the issues identified here were addressed in the **VMR (Volatility Mean Reversion)** strategy:
+> - ✅ Fixed static SL/TP → VMR uses configurable spike+BB detection
+> - ✅ Funding-only signal → VMR uses spike + Bollinger Band dual confirmation
+> - ✅ No statistical validation → VMR optimizer tests 10,000+ combinations
+> - ✅ No reconnect logic → VMR uses LiveTrader with proper error handling
+> 
+> **Current documentation:** See [README.md](../README.md), [README_VMR.md](../README_VMR.md).
+
+---
+
 # Perplexity Sonar Analysis & Critique
 **Date:** 2026-02-26  
 **Analysis by:** Perplexity Sonar  
-**Status:** Critical Review for Hyperliquid Trading Bot v1
+**Status:** Historical critique of v1 funding-rate strategy (strategy_b)
 
 ---
 
