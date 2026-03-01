@@ -634,12 +634,31 @@ class LiveTrader:
 
             logger.debug(f"close_position raw: {resp}")
 
-            statuses  = resp.get("response", {}).get("data", {}).get("statuses", [{}])
-            first     = statuses[0] if statuses else {}
-            error     = first.get("error")
-            filled    = first.get("filled", {})
+            # market_close() returns None when no matching position exists
+            # (e.g. already closed by TP/SL trigger or never opened on exchange)
+            if resp is None:
+                logger.warning(
+                    f"⚠️  close_position({symbol}): market_close returned None — "
+                    f"no open position found on exchange (may have been closed by TP/SL). "
+                    f"Treating as success (position already closed)."
+                )
+                result = OrderResult(
+                    success=True, symbol=symbol, side="CLOSE", order_type="MARKET",
+                    size=size or 0, price=price,
+                    error="No position on exchange (already closed?)",
+                    raw_response=None,
+                )
+                self._order_log.append(result)
+                return result
+
+            response   = resp.get("response", {})
+            data       = response.get("data", {})
+            statuses   = data.get("statuses", [{}])
+            first      = statuses[0] if statuses else {}
+            error      = first.get("error")
+            filled     = first.get("filled", {})
             fill_price = float(filled.get("avgPx") or price)
-            oid       = filled.get("oid")
+            oid        = filled.get("oid")
 
             if error:
                 result = OrderResult(
