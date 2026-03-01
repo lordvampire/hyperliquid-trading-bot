@@ -12,3 +12,5 @@ venv/
 *.egg-info/
 dist/
 build/
+candle_cache/
+optimizer.log

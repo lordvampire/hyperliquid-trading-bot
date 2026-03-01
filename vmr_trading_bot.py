@@ -688,6 +688,12 @@ Loop: {loop_status} | Open positions: {positions}
 
 *BACKTESTING*
 /backtest BTC 30  — Run real-data backtest (30 days)
+/backtest BTC 30 \\-\\-use\\-optimized\\-params
+
+*OPTIMIZATION*
+/optimize BTC         — Grid search (15–60 min)
+/show\\_best\\_params    — Top 3 combos from last run
+/set\\_params spike=1.0 bb\\_mult=2.0 sl=0.005 tp=0.015
 
 *STRATEGY CONFIG*
 Symbols:       {', '.join(CFG.symbols)}
@@ -707,15 +713,27 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
 📖 *Command Reference*
 
+*AUTONOMOUS TRADING*
 /start\\_auto          Start autonomous paper trading loop
 /stop\\_auto           Pause scan loop (positions stay open)
 /stop\\_all            Stop loop, close all positions at market
+
+*MONITORING*
 /status               Open positions with live P&L
 /signals              Latest signal check for BTC, ETH, SOL
 /analyze [SYMBOL]     Detailed signal analysis for one symbol
 /stats                Completed trade statistics
 /balance              Account balance and risk config
-/backtest [SYM] [D]   Run backtest on real Hyperliquid data
+
+*BACKTESTING*
+/backtest [SYM] [D]               Run backtest on real data
+/backtest BTC 30 \\-\\-use\\-optimized\\-params  Backtest with best params
+
+*OPTIMIZATION*
+/optimize [BTC|ETH|SOL]            Run grid search (15–60 min)
+/show\\_best\\_params                  Top 3 combos from last run
+/set\\_params spike=1.0 bb\\_mult=2.0  Apply params live
+
 /start                Welcome message + quick status
 /help                 This message
     """
@@ -967,61 +985,6 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(response, parse_mode="Markdown")
 
 
-async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /backtest [BTC] [days] — Run real-data bar-by-bar backtest.
-
-    Uses VMRStrategy.run_backtest() — THE SAME logic as live/paper trading.
-    Data is fetched fresh from Hyperliquid API.
-    """
-    args = context.args or []
-    symbol = args[0].upper() if args else "BTC"
-    days   = int(args[1]) if len(args) > 1 else 30
-
-    if symbol not in CFG.symbols:
-        await update.message.reply_text(f"❌ Unknown symbol. Use: {', '.join(CFG.symbols)}")
-        return
-
-    msg = await update.message.reply_text(
-        f"⏳ Running {days}-day backtest on {symbol} (real Hyperliquid data)..."
-    )
-
-    df = data_fetcher.get_candles(symbol, days=days)
-    if df is None or df.empty:
-        await msg.edit_text(f"❌ No data for {symbol}")
-        return
-
-    result = strategy.run_backtest(df, symbol)
-
-    pf_str = (
-        f"{result['profit_factor']:.2f}x"
-        if result["profit_factor"] != float("inf")
-        else "∞"
-    )
-
-    response = (
-        f"📊 *Backtest: {symbol} ({days}d)*\n\n"
-        f"Data: {result['total_bars']} bars (1h candles)\n"
-        f"Signals detected: {result['signals_detected']}\n\n"
-        f"*Results*\n"
-        f"Trades:   {result['trades']}\n"
-        f"Wins:     {result['wins']}\n"
-        f"Losses:   {result['losses']}\n"
-        f"Win Rate: {result['win_rate']:.1f}%\n"
-        f"P&L:      ${result['total_pnl_usd']:+.2f}\n"
-        f"Return:   {result['return_pct']:+.2f}%\n"
-        f"Max DD:   {result['max_dd_pct']:.2f}%\n"
-        f"P Factor: {pf_str}\n"
-        f"Avg Win:  {result['avg_win_pct']:+.2f}%\n"
-        f"Avg Loss: {result['avg_loss_pct']:+.2f}%\n\n"
-        f"_Strategy config: spike≥{CFG.spike_threshold_pct}%, "
-        f"BB={'ON' if CFG.require_bb_confirmation else 'OFF'}, "
-        f"SL={CFG.sl_pct*100:.1f}%, TP={CFG.tp_pct*100:.1f}%_"
-    )
-
-    await msg.edit_text(response, parse_mode="Markdown")
-
-
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /stats — Show completed paper trade statistics.
@@ -1121,6 +1084,373 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
+# OPTIMIZATION COMMANDS
+# ============================================================================
+
+import asyncio as _asyncio
+import json as _json
+import subprocess as _subprocess
+from pathlib import Path as _Path
+
+_REPO_ROOT       = _Path(__file__).parent
+_BEST_PARAMS_FILE = _REPO_ROOT / "best_params.json"
+_OPTIMIZER_SCRIPT = _REPO_ROOT / "optimizer.py"
+
+# Track running optimizer subprocess
+_optimizer_proc: Optional[_subprocess.Popen] = None
+_optimizer_symbol: str = ""
+
+
+async def cmd_optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /optimize [BTC|ETH|SOL] — Run parameter grid search for a symbol.
+
+    Spawns optimizer.py as a background subprocess and reports when done.
+    Only one optimization can run at a time.
+    """
+    global _optimizer_proc, _optimizer_symbol
+
+    # Check if one is already running
+    if _optimizer_proc is not None and _optimizer_proc.poll() is None:
+        await update.message.reply_text(
+            f"⏳ Optimizer already running for *{_optimizer_symbol}*.\n"
+            f"Wait for it to finish or restart the bot to cancel.",
+            parse_mode="Markdown",
+        )
+        return
+
+    args = context.args or []
+    symbol = args[0].upper() if args else "BTC"
+    valid_symbols = ["BTC", "ETH", "SOL"]
+    if symbol not in valid_symbols:
+        await update.message.reply_text(
+            f"❌ Unknown symbol. Choose from: {', '.join(valid_symbols)}"
+        )
+        return
+
+    msg = await update.message.reply_text(
+        f"🔬 *Launching optimizer for {symbol}*\n\n"
+        f"Running grid search across {5*5*5*5*4*4:,} parameter combinations.\n"
+        f"This may take 15–60 minutes depending on hardware.\n\n"
+        f"Progress is logged to `optimizer.log`.\n"
+        f"I'll notify you when complete!",
+        parse_mode="Markdown",
+    )
+
+    _optimizer_symbol = symbol
+
+    try:
+        import sys
+        python = sys.executable
+        _optimizer_proc = _subprocess.Popen(
+            [python, str(_OPTIMIZER_SCRIPT), "--symbol", symbol],
+            stdout=open(_REPO_ROOT / "optimizer.log", "a"),
+            stderr=_subprocess.STDOUT,
+            cwd=str(_REPO_ROOT),
+        )
+        logger.info(f"Optimizer subprocess started PID={_optimizer_proc.pid} symbol={symbol}")
+    except Exception as exc:
+        await msg.edit_text(
+            f"❌ Failed to start optimizer: {exc}",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Monitor in background and notify when done
+    async def _monitor():
+        while _optimizer_proc.poll() is None:
+            await asyncio.sleep(30)
+        rc = _optimizer_proc.returncode
+        if rc == 0:
+            summary_file = _REPO_ROOT / "optimization_summary.md"
+            exists = "✅ `optimization_summary.md` updated." if summary_file.exists() else ""
+            await _send_message(
+                context.application,
+                f"🎉 *Optimizer done for {symbol}!*\n\n"
+                f"Return code: {rc} (success)\n"
+                f"{exists}\n\n"
+                f"Use /show\\_best\\_params to see top combos.\n"
+                f"Use /set\\_params to apply the best params live.",
+            )
+        else:
+            await _send_message(
+                context.application,
+                f"❌ *Optimizer failed for {symbol}*\n\n"
+                f"Return code: {rc}\n"
+                f"Check `optimizer.log` for details.",
+            )
+
+    asyncio.create_task(_monitor())
+
+
+async def cmd_show_best_params(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /show_best_params — Display top 3 parameter combos from last optimization.
+
+    Reads best_params.json written by optimizer.py.
+    """
+    if not _BEST_PARAMS_FILE.exists():
+        await update.message.reply_text(
+            "❌ No optimization results found.\n"
+            "Run /optimize BTC (or ETH, SOL) first.",
+        )
+        return
+
+    try:
+        with open(_BEST_PARAMS_FILE) as f:
+            data = _json.load(f)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Could not read best_params.json: {exc}")
+        return
+
+    generated = data.get("generated", "unknown")
+    combos    = data.get("top_combos", [])
+
+    if not combos:
+        await update.message.reply_text("❌ No combos found in best_params.json.")
+        return
+
+    lines = [f"🏆 *Best Parameter Combos* (from {generated})\n"]
+
+    for combo in combos[:3]:
+        rank   = combo.get("rank", "?")
+        p      = combo.get("params", {})
+        sharpe = combo.get("avg_sharpe", 0.0)
+
+        # Per-symbol Sharpes if available
+        sym_sharpes = {
+            k.replace("sharpe_", ""): v
+            for k, v in combo.items()
+            if k.startswith("sharpe_") and v is not None
+        }
+        sym_line = "  ".join(
+            f"{s}:{v:.3f}" for s, v in sym_sharpes.items()
+        )
+
+        lines.append(
+            f"*#{rank}* — Avg Sharpe: `{sharpe:.4f}`\n"
+            f"  {sym_line}\n"
+            f"  • spike:  `{p.get('spike_threshold_pct', '?')}`\n"
+            f"  • bb\\_mult: `{p.get('bb_std_multiplier', '?')}`\n"
+            f"  • sl:     `{p.get('sl_pct', '?')}`\n"
+            f"  • tp:     `{p.get('tp_pct', '?')}`\n"
+            f"  • size:   `{p.get('position_size_pct', '?')}`\n"
+            f"  • hold:   `{int(p.get('max_hold_hours', 24))}h`\n"
+        )
+
+    lines.append(
+        "\n_Apply with:_\n"
+        "`/set_params spike=X bb_mult=Y sl=0.005 tp=0.015 size=0.01 hold=24`"
+    )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_set_params(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /set_params spike=X bb_mult=Y sl=Z tp=W size=V hold=H
+
+    Updates VMRConfig live without restarting the bot.
+    Only the provided keys are changed; others remain at current values.
+
+    Supported keys:
+      spike    → spike_threshold_pct
+      bb_mult  → bb_std_multiplier
+      sl       → sl_pct
+      tp       → tp_pct
+      size     → position_size_pct
+      hold     → max_hold_hours
+      bb_on    → require_bb_confirmation (0/1)
+    """
+    global strategy
+
+    ALIAS_MAP = {
+        "spike":    "spike_threshold_pct",
+        "bb_mult":  "bb_std_multiplier",
+        "sl":       "sl_pct",
+        "tp":       "tp_pct",
+        "size":     "position_size_pct",
+        "hold":     "max_hold_hours",
+        "bb_on":    "require_bb_confirmation",
+    }
+
+    if not context.args:
+        alias_list = "\n".join(f"  {k} → {v}" for k, v in ALIAS_MAP.items())
+        await update.message.reply_text(
+            f"❌ No params given.\n\nUsage:\n"
+            f"`/set_params spike=1.0 bb_mult=2.0 sl=0.005 tp=0.015 size=0.01 hold=24`\n\n"
+            f"Supported keys:\n{alias_list}",
+            parse_mode="Markdown",
+        )
+        return
+
+    changes: Dict[str, Any] = {}
+    errors:  List[str]      = []
+
+    for arg in context.args:
+        if "=" not in arg:
+            errors.append(f"Invalid format `{arg}` (expected key=value)")
+            continue
+        key_raw, val_str = arg.split("=", 1)
+        key_raw = key_raw.lower().strip()
+
+        # Resolve alias
+        cfg_key = ALIAS_MAP.get(key_raw, key_raw)
+
+        if not hasattr(CFG, cfg_key):
+            errors.append(f"Unknown param `{key_raw}`")
+            continue
+
+        try:
+            if cfg_key == "require_bb_confirmation":
+                val = bool(int(val_str))
+            elif cfg_key == "max_hold_hours":
+                val = int(val_str)
+            else:
+                val = float(val_str)
+        except ValueError:
+            errors.append(f"Invalid value `{val_str}` for `{key_raw}`")
+            continue
+
+        setattr(CFG, cfg_key, val)
+        changes[cfg_key] = val
+
+    # Rebuild strategy with updated config (VMRStrategy wraps the config reference)
+    # Since strategy holds a reference to CFG, changes above are already live.
+    # Rebuild explicitly to be safe:
+    strategy = VMRStrategy(CFG)
+
+    if errors:
+        err_text = "\n".join(f"  ⚠️ {e}" for e in errors)
+        await update.message.reply_text(
+            f"⚠️ Some params had errors:\n{err_text}",
+            parse_mode="Markdown",
+        )
+
+    if not changes:
+        await update.message.reply_text("❌ No valid params were applied.")
+        return
+
+    change_lines = "\n".join(
+        f"  • `{k}` = `{v}`" for k, v in changes.items()
+    )
+    await update.message.reply_text(
+        f"✅ *Strategy params updated live:*\n\n"
+        f"{change_lines}\n\n"
+        f"*Current config:*\n"
+        f"  spike = `{CFG.spike_threshold_pct}`\n"
+        f"  bb\\_mult = `{CFG.bb_std_multiplier}`\n"
+        f"  sl = `{CFG.sl_pct}`\n"
+        f"  tp = `{CFG.tp_pct}`\n"
+        f"  size = `{CFG.position_size_pct}`\n"
+        f"  hold = `{CFG.max_hold_hours}h`\n"
+        f"  bb\\_on = `{CFG.require_bb_confirmation}`",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /backtest [BTC] [days] [--use-optimized-params]
+
+    Run real-data bar-by-bar backtest.
+    With --use-optimized-params, loads top-1 combo from best_params.json.
+    """
+    args = context.args or []
+
+    use_opt  = "--use-optimized-params" in args
+    clean_args = [a for a in args if a != "--use-optimized-params"]
+
+    symbol = clean_args[0].upper() if clean_args else "BTC"
+    days   = int(clean_args[1]) if len(clean_args) > 1 else 30
+
+    if symbol not in CFG.symbols:
+        await update.message.reply_text(f"❌ Unknown symbol. Use: {', '.join(CFG.symbols)}")
+        return
+
+    # Choose config: optimized or current
+    bt_cfg = VMRConfig(
+        spike_threshold_pct  = CFG.spike_threshold_pct,
+        bb_std_multiplier    = CFG.bb_std_multiplier,
+        sl_pct               = CFG.sl_pct,
+        tp_pct               = CFG.tp_pct,
+        position_size_pct    = CFG.position_size_pct,
+        max_hold_hours       = CFG.max_hold_hours,
+        require_bb_confirmation = CFG.require_bb_confirmation,
+    )
+
+    opt_label = ""
+    if use_opt:
+        if not _BEST_PARAMS_FILE.exists():
+            await update.message.reply_text(
+                "❌ No optimization results found. Run /optimize first."
+            )
+            return
+        try:
+            with open(_BEST_PARAMS_FILE) as f:
+                best_data = _json.load(f)
+            top = best_data.get("top_combos", [])
+            if not top:
+                raise ValueError("Empty top_combos list")
+            p = top[0]["params"]
+            bt_cfg.spike_threshold_pct = float(p.get("spike_threshold_pct", bt_cfg.spike_threshold_pct))
+            bt_cfg.bb_std_multiplier   = float(p.get("bb_std_multiplier",   bt_cfg.bb_std_multiplier))
+            bt_cfg.sl_pct              = float(p.get("sl_pct",              bt_cfg.sl_pct))
+            bt_cfg.tp_pct              = float(p.get("tp_pct",              bt_cfg.tp_pct))
+            bt_cfg.position_size_pct   = float(p.get("position_size_pct",   bt_cfg.position_size_pct))
+            bt_cfg.max_hold_hours      = int(p.get("max_hold_hours",        bt_cfg.max_hold_hours))
+            opt_label = " \\[optimized params\\]"
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Could not load optimized params: {exc}")
+            return
+
+    msg = await update.message.reply_text(
+        f"⏳ Running {days}\\-day backtest on {symbol}{opt_label} "
+        f"\\(real Hyperliquid data\\)\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    df = data_fetcher.get_candles(symbol, days=days)
+    if df is None or df.empty:
+        await msg.edit_text(f"❌ No data for {symbol}")
+        return
+
+    bt_strategy = VMRStrategy(bt_cfg)
+    result = bt_strategy.run_backtest(df, symbol)
+
+    pf_str = (
+        f"{result['profit_factor']:.2f}x"
+        if result["profit_factor"] != float("inf")
+        else "∞"
+    )
+
+    opt_note = "\n_Using optimized params from last optimization run._" if use_opt else ""
+
+    response = (
+        f"📊 *Backtest: {symbol} ({days}d)*{opt_note}\n\n"
+        f"Data: {result['total_bars']} bars (1h candles)\n"
+        f"Signals detected: {result['signals_detected']}\n\n"
+        f"*Results*\n"
+        f"Trades:   {result['trades']}\n"
+        f"Wins:     {result['wins']}\n"
+        f"Losses:   {result['losses']}\n"
+        f"Win Rate: {result['win_rate']:.1f}%\n"
+        f"P&L:      ${result['total_pnl_usd']:+.2f}\n"
+        f"Return:   {result['return_pct']:+.2f}%\n"
+        f"Max DD:   {result['max_dd_pct']:.2f}%\n"
+        f"P Factor: {pf_str}\n"
+        f"Avg Win:  {result['avg_win_pct']:+.2f}%\n"
+        f"Avg Loss: {result['avg_loss_pct']:+.2f}%\n\n"
+        f"_Config: spike≥{bt_cfg.spike_threshold_pct}%, "
+        f"BB={'ON' if bt_cfg.require_bb_confirmation else 'OFF'}, "
+        f"SL={bt_cfg.sl_pct*100:.1f}%, TP={bt_cfg.tp_pct*100:.1f}%, "
+        f"hold={bt_cfg.max_hold_hours}h_"
+    )
+
+    await msg.edit_text(response, parse_mode="Markdown")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -1157,18 +1487,22 @@ def main():
 
     # Register all commands
     handlers = [
-        ("start",      cmd_start),
-        ("help",       cmd_help),
-        ("start_auto", cmd_start_auto),
-        ("stop_auto",  cmd_stop_auto),
-        ("stop_all",   cmd_stop_all),
-        ("status",     cmd_status),
-        ("signals",    cmd_signals),
-        ("analyze",    cmd_analyze),
-        ("backtest",   cmd_backtest),
-        ("stats",      cmd_stats),
-        ("balance",    cmd_balance),
-        ("mode",       cmd_mode),
+        ("start",            cmd_start),
+        ("help",             cmd_help),
+        ("start_auto",       cmd_start_auto),
+        ("stop_auto",        cmd_stop_auto),
+        ("stop_all",         cmd_stop_all),
+        ("status",           cmd_status),
+        ("signals",          cmd_signals),
+        ("analyze",          cmd_analyze),
+        ("backtest",         cmd_backtest),
+        ("stats",            cmd_stats),
+        ("balance",          cmd_balance),
+        ("mode",             cmd_mode),
+        # Optimization commands
+        ("optimize",         cmd_optimize),
+        ("set_params",       cmd_set_params),
+        ("show_best_params", cmd_show_best_params),
     ]
 
     for cmd, handler in handlers:

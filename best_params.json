@@ -1,0 +1,50 @@
+{
+  "generated": "2026-03-01 13:31",
+  "top_combos": [
+    {
+      "rank": 1,
+      "params": {
+        "spike_threshold_pct": 0.5,
+        "bb_std_multiplier": 3.0,
+        "sl_pct": 0.005,
+        "tp_pct": 0.025,
+        "position_size_pct": 0.015,
+        "max_hold_hours": 12.0
+      },
+      "avg_sharpe": 0.7031333333333332,
+      "sharpe_BTC": 2.3682,
+      "sharpe_ETH": -0.0445,
+      "sharpe_SOL": -0.2143
+    },
+    {
+      "rank": 2,
+      "params": {
+        "spike_threshold_pct": 0.5,
+        "bb_std_multiplier": 3.0,
+        "sl_pct": 0.005,
+        "tp_pct": 0.025,
+        "position_size_pct": 0.02,
+        "max_hold_hours": 12.0
+      },
+      "avg_sharpe": 0.7031333333333332,
+      "sharpe_BTC": 2.3682,
+      "sharpe_ETH": -0.0445,
+      "sharpe_SOL": -0.2143
+    },
+    {
+      "rank": 3,
+      "params": {
+        "spike_threshold_pct": 0.5,
+        "bb_std_multiplier": 3.0,
+        "sl_pct": 0.005,
+        "tp_pct": 0.025,
+        "position_size_pct": 0.01,
+        "max_hold_hours": 12.0
+      },
+      "avg_sharpe": 0.7031333333333332,
+      "sharpe_BTC": 2.3682,
+      "sharpe_ETH": -0.0445,
+      "sharpe_SOL": -0.2143
+    }
+  ]
+}
