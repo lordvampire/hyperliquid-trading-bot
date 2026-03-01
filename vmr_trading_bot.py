@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-vmr_trading_bot.py — Volatility Mean Reversion Paper Trading Bot
-=================================================================
-Hyperliquid Testnet / Paper Trading
+vmr_trading_bot.py — Volatility Mean Reversion Trading Bot
+===========================================================
+Hyperliquid Testnet (Live) or Paper Trading — auto-detected
+
+MODE DETECTION:
+  HL_SECRET_KEY set in .env → LIVE mode  (real orders on testnet/mainnet)
+  HL_SECRET_KEY missing     → PAPER mode (simulation with fake balance)
+  HL_DRY_RUN=true           → DRY RUN   (validates but sends zero orders)
 
 ARCHITECTURE (Single Source of Truth):
   All strategy logic lives in strategy_engine.py → VMRStrategy.
   This file handles:
     • Telegram bot interface (commands + notifications)
     • Autonomous trading loop (auto-scan every N minutes)
-    • Paper trading state management
+    • Paper OR Live trading state management
     • Real candle data from Hyperliquid API
 
+LIVE MODE:
+  • Uses LiveTrader (live_trader.py) to place REAL orders on Hyperliquid
+  • Reads REAL balance from your margin account
+  • Places market orders with optional SL/TP trigger orders
+  • Closes positions via market_close()
+
 PAPER TRADING MODE:
-  • Starts an asyncio background task that scans for signals every
-    SCAN_INTERVAL_SECONDS (default 15 min from VMRConfig).
-  • On signal: auto-opens position, sends Telegram notification.
-  • On SL/TP hit: closes position, opens next signal if available.
-  • NO manual trigger needed — bot trades autonomously.
+  • Simulates trades with a configurable fake balance
+  • No real orders sent, no real money at risk
 
 COMMANDS:
   /start              — Show help and current status
   /help               — Full command reference
-  /start_auto         — Start autonomous paper trading loop
+  /start_auto         — Start autonomous trading loop
   /stop_auto          — Stop the loop (keep positions open)
   /status             — Current positions, P&L, scan interval
   /analyze [BTC|ETH|SOL] — On-demand signal analysis
@@ -31,6 +39,7 @@ COMMANDS:
   /stats              — Completed trade statistics
   /balance            — Account balance and risk settings
   /stop_all           — Stop loop and close all positions at market
+  /mode               — Show current trading mode (live/paper/dry-run)
 """
 
 from __future__ import annotations
@@ -44,6 +53,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -53,6 +65,9 @@ from hyperliquid.utils import constants
 
 # ── Strategy: import from single source of truth ─────────────────────────────
 from strategy_engine import VMRConfig, VMRPosition, VMRStrategy, VMRSignal
+
+# ── Live trading ──────────────────────────────────────────────────────────────
+from live_trader import LiveTrader, OrderResult
 
 
 # ============================================================================
@@ -93,7 +108,22 @@ CFG = VMRConfig(
     lookback_days=7,
 )
 
+# ── Trading mode detection ────────────────────────────────────────────────────
+# LIVE mode  → HL_SECRET_KEY is set in .env
+# PAPER mode → HL_SECRET_KEY missing or empty
+# DRY RUN    → HL_DRY_RUN=true  (or --dry-run CLI flag)
+
+_HL_SECRET_KEY  = os.getenv("HL_SECRET_KEY", "").strip()
+_HL_DRY_RUN     = os.getenv("HL_DRY_RUN", "false").lower() == "true"
+LIVE_MODE       = bool(_HL_SECRET_KEY)
+DRY_RUN         = _HL_DRY_RUN
+
 PAPER_ACCOUNT_BALANCE = float(os.getenv("PAPER_BALANCE", "10000.0"))
+
+# Initialise LiveTrader (shared instance — not None even in paper mode, for balance reads)
+live_trader: Optional[LiveTrader] = None
+if LIVE_MODE:
+    live_trader = LiveTrader(dry_run=DRY_RUN)
 
 
 # ============================================================================
@@ -371,7 +401,20 @@ class PaperTrader:
 
 data_fetcher = DataFetcher()
 strategy     = VMRStrategy(CFG)
-paper        = PaperTrader(PAPER_ACCOUNT_BALANCE)
+
+# Determine starting balance:
+#   LIVE mode  → fetch real balance from Hyperliquid margin account
+#   PAPER mode → use PAPER_ACCOUNT_BALANCE env var (default $10,000)
+def _resolve_starting_balance() -> float:
+    if LIVE_MODE and live_trader is not None:
+        bal = live_trader.get_balance()
+        if bal > 0:
+            logger.info(f"💰 Real testnet balance: ${bal:,.2f}")
+            return bal
+        logger.warning("⚠️  Could not fetch real balance — falling back to paper balance")
+    return PAPER_ACCOUNT_BALANCE
+
+paper = PaperTrader(_resolve_starting_balance())
 
 # asyncio task handle for the autonomous loop
 _scan_task: Optional[asyncio.Task] = None
@@ -397,13 +440,18 @@ async def trading_loop(app: Application):
     """
     global paper
 
+    mode_label = "🔴 LIVE" if LIVE_MODE else "📄 PAPER"
+    if LIVE_MODE and DRY_RUN:
+        mode_label = "🔵 DRY RUN"
+
     logger.info(
-        f"🤖 Autonomous trading loop started — "
+        f"🤖 Autonomous trading loop started [{mode_label}] — "
         f"scan every {CFG.scan_interval_seconds}s"
     )
     await _send_message(
         app,
         f"🤖 *Autonomous Trading Loop STARTED*\n"
+        f"Mode: {mode_label}\n"
         f"Scan interval: {CFG.scan_interval_seconds // 60} min\n"
         f"Symbols: {', '.join(CFG.symbols)}\n"
         f"Balance: ${paper.account_balance:,.2f}\n"
@@ -454,6 +502,18 @@ async def trading_loop(app: Application):
                     if should_exit:
                         closed = paper.close_position(symbol, check_price, reason, strategy)
                         if closed:
+                            # ── LIVE: close real position ────────────────────
+                            if LIVE_MODE and live_trader is not None:
+                                close_result = live_trader.close_position(symbol)
+                                if close_result.success:
+                                    logger.info(
+                                        f"✅ LIVE CLOSE {symbol} — OID={close_result.order_id} "
+                                        f"fill=${close_result.price:,.2f}"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"❌ LIVE CLOSE FAILED {symbol}: {close_result.error}"
+                                    )
                             await _send_position_closed(app, closed)
 
                 # ── 2. Entry signal check ────────────────────────────────────
@@ -473,8 +533,37 @@ async def trading_loop(app: Application):
 
                         pos_info = strategy.calculate_position(signal, paper.account_balance)
                         if pos_info:
-                            pos = paper.open_position(signal, pos_info)
-                            await _send_position_opened(app, pos, signal)
+                            # ── LIVE: place real order ───────────────────────
+                            live_order_ok = True
+                            if LIVE_MODE and live_trader is not None:
+                                order_result = live_trader.place_order(
+                                    symbol=signal.symbol,
+                                    direction=signal.direction,
+                                    size_usd=pos_info["size_usd"],
+                                    entry_price=signal.entry_price,
+                                    stop_loss=signal.stop_loss,
+                                    take_profit=signal.take_profit,
+                                    order_type="MARKET",
+                                )
+                                if order_result.success:
+                                    logger.info(
+                                        f"✅ LIVE ORDER {signal.symbol} — "
+                                        f"OID={order_result.order_id} "
+                                        f"fill=${order_result.price:,.2f}"
+                                    )
+                                    # Use actual fill price for paper tracking
+                                    signal = signal._replace(entry_price=order_result.price) \
+                                             if hasattr(signal, '_replace') else signal
+                                else:
+                                    logger.error(
+                                        f"❌ LIVE ORDER FAILED {signal.symbol}: "
+                                        f"{order_result.error}"
+                                    )
+                                    live_order_ok = False
+
+                            if live_order_ok:
+                                pos = paper.open_position(signal, pos_info)
+                                await _send_position_opened(app, pos, signal)
 
         except asyncio.CancelledError:
             logger.info("Trading loop cancelled — shutting down")
@@ -511,7 +600,7 @@ async def _send_message(app: Application, text: str):
 
 async def _send_position_opened(app: Application, pos: VMRPosition, signal: VMRSignal):
     """
-    Notify Telegram that a new paper position was opened.
+    Notify Telegram that a position was opened.
 
     Args:
         app:    Running Telegram Application.
@@ -519,8 +608,15 @@ async def _send_position_opened(app: Application, pos: VMRPosition, signal: VMRS
         signal: The VMRSignal that triggered the entry.
     """
     emoji = "📈" if pos.direction == "LONG" else "📉"
+    if LIVE_MODE and DRY_RUN:
+        mode_tag = "🔵 DRY-RUN TRADE OPENED"
+    elif LIVE_MODE:
+        mode_tag = "🔴 LIVE TRADE OPENED"
+    else:
+        mode_tag = "📄 PAPER TRADE OPENED"
+
     msg = (
-        f"{emoji} *NEW PAPER TRADE OPENED*\n\n"
+        f"{emoji} *{mode_tag}*\n\n"
         f"Symbol:  {pos.symbol}\n"
         f"Side:    {pos.direction}\n"
         f"Entry:   ${pos.entry_price:,.2f}\n"
@@ -535,15 +631,22 @@ async def _send_position_opened(app: Application, pos: VMRPosition, signal: VMRS
 
 async def _send_position_closed(app: Application, pos: VMRPosition):
     """
-    Notify Telegram that a paper position was closed.
+    Notify Telegram that a position was closed.
 
     Args:
         app: Running Telegram Application.
         pos: The closed VMRPosition (with pnl_pct, pnl_usd filled in).
     """
     result_emoji = "✅ WIN" if pos.pnl_usd >= 0 else "❌ LOSS"
+    if LIVE_MODE and DRY_RUN:
+        mode_tag = "DRY-RUN TRADE CLOSED"
+    elif LIVE_MODE:
+        mode_tag = "🔴 LIVE TRADE CLOSED"
+    else:
+        mode_tag = "PAPER TRADE CLOSED"
+
     msg = (
-        f"{result_emoji} *PAPER TRADE CLOSED*\n\n"
+        f"{result_emoji} *{mode_tag}*\n\n"
         f"Symbol:  {pos.symbol}\n"
         f"Side:    {pos.direction}\n"
         f"Entry:   ${pos.entry_price:,.2f}\n"
@@ -686,6 +789,16 @@ async def cmd_stop_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for symbol in list(paper.positions.keys()):
         df = data_fetcher.get_candles(symbol, days=1)
         price = float(df["close"].iloc[-1]) if df is not None else paper.positions[symbol].entry_price
+
+        # ── LIVE: close real position ──────────────────────────────────────
+        if LIVE_MODE and live_trader is not None:
+            close_result = live_trader.close_position(symbol)
+            if close_result.success:
+                price = close_result.price or price
+                logger.info(f"✅ LIVE CLOSE {symbol} @ ${price:,.2f}")
+            else:
+                logger.error(f"❌ LIVE CLOSE FAILED {symbol}: {close_result.error}")
+
         closed = paper.close_position(symbol, price, "MANUAL", strategy)
         if closed:
             closed_text += (
@@ -944,9 +1057,36 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response, parse_mode="Markdown")
 
 
+async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /mode — Show current trading mode (live / dry-run / paper).
+    """
+    if LIVE_MODE and DRY_RUN:
+        label   = "🔵 DRY RUN"
+        details = "Live credentials loaded, but HL\\_DRY\\_RUN=true — zero real orders."
+    elif LIVE_MODE:
+        label   = "🔴 LIVE TESTNET" if os.getenv("HL_TESTNET", "true").lower() == "true" else "🔴 LIVE MAINNET"
+        details = "Real orders are being placed on Hyperliquid."
+    else:
+        label   = "📄 PAPER"
+        details = "Simulation only — no HL\\_SECRET\\_KEY set."
+
+    wallet = os.getenv("HL_WALLET_ADDRESS", "(not set)")
+    wallet_display = wallet[:10] + "..." + wallet[-6:] if len(wallet) > 20 else wallet
+
+    response = (
+        f"⚙️ *Trading Mode: {label}*\n\n"
+        f"{details}\n\n"
+        f"Wallet: `{wallet_display}`\n"
+        f"Order log: {len(live_trader.get_order_log()) if live_trader else 0} orders this session"
+    )
+    await update.message.reply_text(response, parse_mode="Markdown")
+
+
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /balance — Show account balance and risk configuration.
+    In LIVE mode, fetches real balance from Hyperliquid.
     """
     prices = {}
     for symbol in CFG.symbols:
@@ -956,8 +1096,16 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     equity = paper.equity(prices)
 
+    # In live mode, also fetch real balance from Hyperliquid
+    real_balance_line = ""
+    if LIVE_MODE and live_trader is not None:
+        real_bal = live_trader.get_balance()
+        network  = live_trader.network_label()
+        real_balance_line = f"HL Account ({network}): ${real_bal:,.2f}\n"
+
     response = (
         f"💰 *Account Balance*\n\n"
+        f"{real_balance_line}"
         f"Starting:    ${paper.starting_balance:,.2f}\n"
         f"Current:     ${paper.account_balance:,.2f}\n"
         f"Equity:      ${equity:,.2f}\n"
@@ -984,10 +1132,18 @@ def main():
     The autonomous trading loop is started via /start_auto command.
     """
     logger.info("=" * 70)
-    logger.info("VMR PAPER TRADING BOT — Starting up")
+    logger.info("VMR TRADING BOT — Starting up")
     logger.info("=" * 70)
-    logger.info(f"Mode:          PAPER TRADING (no real money)")
-    logger.info(f"Balance:       ${PAPER_ACCOUNT_BALANCE:,.2f}")
+
+    if LIVE_MODE and DRY_RUN:
+        logger.info("Mode:          🔵 DRY RUN (live credentials loaded, no orders sent)")
+    elif LIVE_MODE:
+        network = live_trader.network_label() if live_trader else "TESTNET"
+        logger.info(f"Mode:          🔴 LIVE TRADING ({network})")
+    else:
+        logger.info("Mode:          📄 PAPER TRADING (no real money)")
+
+    logger.info(f"Balance:       ${paper.starting_balance:,.2f}")
     logger.info(f"Symbols:       {', '.join(CFG.symbols)}")
     logger.info(f"Spike thresh:  {CFG.spike_threshold_pct}%")
     logger.info(f"BB filter:     {'ON' if CFG.require_bb_confirmation else 'OFF'}")
@@ -1012,6 +1168,7 @@ def main():
         ("backtest",   cmd_backtest),
         ("stats",      cmd_stats),
         ("balance",    cmd_balance),
+        ("mode",       cmd_mode),
     ]
 
     for cmd, handler in handlers:
